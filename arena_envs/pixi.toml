@@ -2,24 +2,17 @@
 authors = ["Andras Polgar <azazdeaz@gmail.com>"]
 channels = ["conda-forge"]
 name = "arena_envs"
-platforms = [{ platform = "linux-64", glibc = "2.35", cuda = "12.0" }]
+platforms = [{ platform = "linux-64", cuda = "12.0" }]
 version = "0.1.0"
 
 [tasks]
-install-isaaclab = { cmd = "cd ../submodules/IsaacLab && chmod +x isaaclab.sh && ./isaaclab.sh --install"}
+# install-isaaclab = { cmd = "cd ../submodules/IsaacLab && chmod +x isaaclab.sh && ./isaaclab.sh --install"}
+install-isaaclab = { cmd = "./isaaclab.sh --install", cwd = "../submodules/IsaacLab"}
 
 [dependencies]
 python = "3.12.*"
 pip = "*"
-packaging = "==26.0"
-setuptools = "<82"
-jinja2 = "==3.1.5"
 
-[pypi-options]
-extra-index-urls = ["https://pypi.nvidia.com"]
-prerelease-mode = "allow"
-index-strategy = "unsafe-best-match"
 
 [pypi-dependencies]
-isaacsim = { version = "==6.0.1.0", extras = ["all", "extscache"], index = "https://pypi.nvidia.com" }
 isaaclab-arena = { path = "../submodules/IsaacLab-Arena", editable = true }
