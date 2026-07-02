@@ -1,5 +1,5 @@
-# pixi environments
-.pixi/*
-!.pixi/config.toml
+# Python
+__pycache__/
+*.egg-info
 
 logs/*
