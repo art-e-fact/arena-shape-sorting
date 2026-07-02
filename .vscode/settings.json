@@ -1,0 +1,20 @@
+{
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/submodules/IsaacLab-Arena",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_assets",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_rl",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_mimic",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_tasks",
+    ],
+    "cursorpyright.analysis.extraPaths": [
+        "${workspaceFolder}",
+        "${workspaceFolder}/submodules/IsaacLab-Arena",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_assets",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_rl",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_mimic",
+        "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_tasks",
+    ]
+}

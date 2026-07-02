@@ -1,0 +1,10 @@
+[environment]
+extra-paths = [
+    ".",
+    "./submodules/IsaacLab-Arena",
+    "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab",
+    "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_assets",
+    "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_rl",
+    "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_mimic",
+    "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_tasks",
+]
