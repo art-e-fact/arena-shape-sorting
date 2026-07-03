@@ -1,6 +1,8 @@
 [environment]
 extra-paths = [
     ".",
+    "./arena_envs",
+    "./arena_envs/src",
     "./submodules/IsaacLab-Arena",
     "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab",
     "./submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_assets",

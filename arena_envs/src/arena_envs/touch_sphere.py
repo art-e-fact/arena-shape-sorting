@@ -35,6 +35,7 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
 
         # The target floats (kinematic) in front of the robot. The default position is a
         # reachable spot for the Franka; tune with --sphere_x/--sphere_y/--sphere_z.
+        spawn_radius = args_cli.sphere_spawn_radius
         touch_sphere = TouchSphere(
             initial_pose=Pose(
                 position_xyz=(args_cli.sphere_x, args_cli.sphere_y, args_cli.sphere_z),
@@ -42,6 +43,11 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
             ),
             touch_force_threshold=args_cli.touch_force_threshold,
         )
+        # When radius > 0 the task registers a per-env ball-randomisation event that
+        # writes the root pose itself; disable the default fixed-pose reset event so
+        # the two don't fight each other.
+        if spawn_radius > 0.0:
+            touch_sphere.disable_reset_pose()
 
         scene = Scene(assets=[ground_plane, light, touch_sphere])
 
@@ -53,6 +59,7 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
                 touch_object=touch_sphere,
                 embodiment=embodiment,
                 rl_training_mode=args_cli.rl_training_mode,
+                sphere_spawn_radius=spawn_radius,
             ),
             rl_framework_entry_point="rsl_rl_cfg_entry_point",
             rl_policy_cfg=f"{base_rsl_rl_policy.__name__}:RLPolicyCfg",
@@ -66,3 +73,9 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
         parser.add_argument("--sphere_y", type=float, default=0.0)
         parser.add_argument("--sphere_z", type=float, default=0.3)
         parser.add_argument("--touch_force_threshold", type=float, default=1.0)
+        parser.add_argument(
+            "--sphere_spawn_radius",
+            type=float,
+            default=0.2,
+            help="Uniform-in-ball radius (m) around sphere_x/y/z for per-env spawn randomisation. 0 = fixed pose.",
+        )
