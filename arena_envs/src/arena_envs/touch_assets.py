@@ -162,3 +162,34 @@ class TouchSphere(Object, Touchable):
             **self.asset_cfg_addon,
         )
         return self._add_initial_pose_to_cfg(cfg)
+
+
+def make_touch_spheres(
+    num_spheres: int,
+    region_center: tuple[float, float, float],
+    region_half_extent: tuple[float, float, float],
+    touch_force_threshold: float = 1.0,
+) -> list[TouchSphere]:
+    """Build ``num_spheres`` independent floating touch targets.
+
+    Each sphere gets a distinct name/prim and a spread-out initial pose for a sane
+    pre-reset layout. Per-asset ``spawn_radius`` is left at 0 because the task's
+    scatter event (``randomize_object_pose`` with ``min_separation``) repositions all
+    spheres jointly on every per-env reset.
+    """
+    cx, cy, cz = region_center
+    hx, _, _ = region_half_extent
+    spheres: list[TouchSphere] = []
+    for i in range(num_spheres):
+        frac = i / (num_spheres - 1) if num_spheres > 1 else 0.5
+        x = cx - hx + 2.0 * hx * frac
+        spheres.append(
+            TouchSphere(
+                instance_name=f"touch_sphere_{i}",
+                prim_path=f"{{ENV_REGEX_NS}}/TouchSphere_{i}",
+                initial_pose=Pose(position_xyz=(x, cy, cz), rotation_xyzw=(0.0, 0.0, 0.0, 1.0)),
+                touch_force_threshold=touch_force_threshold,
+                spawn_radius=0.0,
+            )
+        )
+    return spheres

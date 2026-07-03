@@ -1,13 +1,14 @@
 """Scripted demo policy for the ``touch_sphere`` task.
 
-A minimal, non-learned policy that drives the Franka's end-effector to the touch
-target so you can *see* the task being solved. It plugs into the standard policy
-runner via ``@register_policy`` (like ``ZeroActionPolicy``), so no change to the
-environment is needed.
+A minimal, non-learned policy that drives the Franka's end-effector to each touch
+target in turn so you can *see* the task being solved. It always heads for the
+nearest not-yet-touched sphere (order doesn't matter). It plugs into the standard
+policy runner via ``@register_policy`` (like ``ZeroActionPolicy``), so no change to
+the environment is needed.
 
 Two modes:
-  * straight line (default): closed-loop, step the EE straight at the sphere each frame.
-  * cuRobo: plan a collision-free EE path once, then follow its waypoints.
+  * straight line (default): closed-loop, step the EE straight at the nearest sphere each frame.
+  * cuRobo: plan a collision-free EE path to one sphere at a time, then follow its waypoints.
 
 Both emit the differential-IK arm action layout ``[dpos(3), drot(3), gripper(1)]``
 (relative pose delta + binary gripper). Assumes a single environment (env 0) with
@@ -41,19 +42,26 @@ class ScriptedTouchPolicyArgs:
 
 @register_policy
 class ScriptedTouchPolicy(PolicyBase):
-    """Drives the Franka EE to the ``touch_sphere`` target with a scripted trajectory."""
+    """Drives the Franka EE to each ``touch_sphere_<i>`` target with a scripted trajectory."""
 
     name = "scripted_touch"
     config_class = ScriptedTouchPolicyArgs
+    reach_tol_m = 0.06  # EE-to-centre distance under which a sphere counts as touched
 
     def __init__(self, config: ScriptedTouchPolicyArgs):
         super().__init__(config)
         self._planner = None  # lazily created CuroboPlanner (cuRobo mode only)
+        self._names: list[str] | None = None  # cached touch-target entity names
+        self._touched: set[int] = set()  # indices of spheres already reached this episode
+        self._target_idx: int | None = None  # sphere currently being planned to (cuRobo mode)
         self._waypoints: list[torch.Tensor] | None = None  # cached 4x4 EE target poses
         self._wp_index = 0
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        # Drop the cached plan so the next episode re-plans from the new state.
+        # Drop episode progress and any cached plan so the next episode starts fresh.
+        # ``_names`` is kept: the scene entities are stable across episodes.
+        self._touched = set()
+        self._target_idx = None
         self._waypoints = None
         self._wp_index = 0
 
@@ -86,32 +94,68 @@ class ScriptedTouchPolicy(PolicyBase):
         grip = torch.tensor([gripper], device=dpos.device, dtype=dpos.dtype)
         return torch.cat([dpos, drot, grip]).unsqueeze(0)  # (1, 7)
 
+    def _sphere_names(self, base) -> list[str]:
+        """Discover and cache the touch-target entity names (``touch_sphere_<i>``)."""
+        import re
+
+        if self._names is None:
+            names = [k for k in base.scene.rigid_objects.keys() if re.fullmatch(r"touch_sphere_\d+", k)]
+            self._names = sorted(names, key=lambda n: int(n.rsplit("_", 1)[1]))
+        return self._names
+
+    def _sphere_pos(self, base, name: str) -> torch.Tensor:
+        """World-frame position (3,) of sphere ``name`` in env 0."""
+        import warp as wp
+
+        return wp.to_torch(base.scene[name].data.root_pos_w)[0]
+
     # -- main ------------------------------------------------------------------
 
     def get_action(self, env, observation) -> torch.Tensor:
-        import warp as wp
-
         import isaaclab.utils.math as PoseUtils
 
         base = env.unwrapped
-        sphere_pos = wp.to_torch(base.scene["touch_sphere"].data.root_pos_w)[0]  # (3,) world
+        names = self._sphere_names(base)
+        ee_pose = self._ee_pose_w(base)
+        ee_rot, ee_pos = ee_pose[:3, :3], ee_pose[:3, 3]
+
+        # Latch every sphere the EE is currently close enough to have touched.
+        for i, name in enumerate(names):
+            if torch.norm(self._sphere_pos(base, name) - ee_pos) < self.reach_tol_m:
+                self._touched.add(i)
+
+        remaining = [i for i in range(len(names)) if i not in self._touched]
+        if not remaining:
+            # All spheres touched: hold the current pose (near-zero delta).
+            return self._delta_action(base, ee_pose)
 
         if not self.config.use_curobo:
-            # Straight-line closed-loop reach: aim the EE at the sphere centre, keep orientation.
-            target = PoseUtils.make_pose(sphere_pos, self._ee_pose_w(base)[:3, :3])
+            # Straight-line closed-loop reach toward the ne arest not-yet-touched sphere.
+            target_idx = min(remaining, key=lambda i: torch.norm(self._sphere_pos(base, names[i]) - ee_pos))
+            target = PoseUtils.make_pose(self._sphere_pos(base, names[target_idx]), ee_rot)
             return self._delta_action(base, target)
 
-        # cuRobo mode: plan a collision-free path to the sphere once, then follow it.
-        if self._waypoints is None:
-            self._waypoints = self._plan_to(base, sphere_pos)
+        # cuRobo mode: plan to one sphere at a time, replanning when the target changes.
+        if self._target_idx is None or self._target_idx in self._touched:
+            self._target_idx = min(
+                remaining, key=lambda i: torch.norm(self._sphere_pos(base, names[i]) - ee_pos)
+            )
+            self._waypoints = self._plan_to(base, names[self._target_idx], self._sphere_pos(base, names[self._target_idx]))
+            self._wp_index = 0
 
         # One waypoint per step; hold the final pose once exhausted so the EE settles into contact.
         target = self._waypoints[min(self._wp_index, len(self._waypoints) - 1)]
         self._wp_index += 1
         return self._delta_action(base, target)
 
-    def _plan_to(self, base, sphere_pos: torch.Tensor) -> list[torch.Tensor]:
-        """Build the planner on first use and return a list of 4x4 EE target poses."""
+    def _plan_to(self, base, target_name: str, sphere_pos: torch.Tensor) -> list[torch.Tensor]:
+        """Build the planner on first use and return a list of 4x4 EE target poses.
+
+        The sphere we're currently reaching for is temporarily removed from the collision
+        world before planning: its own geometry would otherwise make the goal pose (the
+        sphere centre) collide, and cuRobo's collision-aware IK returns ``IK_FAIL``. The
+        other spheres stay active, so the planner still avoids them.
+        """
         import isaaclab.utils.math as PoseUtils
         from isaaclab_mimic.motion_planners.curobo.curobo_planner import CuroboPlanner
         from isaaclab_mimic.motion_planners.curobo.curobo_planner_cfg import CuroboPlannerCfg
@@ -122,17 +166,27 @@ class ScriptedTouchPolicy(PolicyBase):
         with torch.inference_mode(False), torch.enable_grad():
             if self._planner is None:
                 cfg = CuroboPlannerCfg.franka_config()
-                # Don't treat the touch target itself as an obstacle, or the planner would
-                # avoid the very thing we want to touch.
-                cfg.world_ignore_substrings = list(cfg.world_ignore_substrings) + ["TouchSphere"]
+                cfg.visualize_spheres=True
+                cfg.visualize_plan=True
+                cfg.debug_planner=True
                 self._planner = CuroboPlanner(env=base, robot=base.scene["robot"], config=cfg, env_id=0)
 
-            # Reach the sphere while keeping the current EE orientation (orientation is irrelevant here).
-            goal = PoseUtils.make_pose(sphere_pos.clone(), self._ee_pose_w(base)[:3, :3].clone())
-            if not self._planner.update_world_and_plan_motion(goal):
-                # Planning failed: fall back to a single straight-line target.
-                return [goal.detach()]
-            return [p.detach() for p in self._planner.get_planned_poses()]
+            # Disable only the target sphere's obstacle so the goal is reachable; the rest
+            # remain active for collision avoidance. Always restore it afterwards.
+            target_path = self._planner._get_object_mappings().get(target_name)
+            coll_checker = self._planner.motion_gen.world_coll_checker
+            if target_path is not None:
+                coll_checker.enable_obstacle(target_path, enable=False)
+            try:
+                # Reach the sphere while keeping the current EE orientation (orientation is irrelevant here).
+                goal = PoseUtils.make_pose(sphere_pos.clone(), self._ee_pose_w(base)[:3, :3].clone())
+                if not self._planner.update_world_and_plan_motion(goal):
+                    # Planning failed: fall back to a single straight-line target.
+                    return [goal.detach()]
+                return [p.detach() for p in self._planner.get_planned_poses()]
+            finally:
+                if target_path is not None:
+                    coll_checker.enable_obstacle(target_path, enable=True)
 
     # -- CLI plumbing ----------------------------------------------------------
 

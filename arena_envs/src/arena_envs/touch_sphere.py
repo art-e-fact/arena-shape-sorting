@@ -22,40 +22,44 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
         import isaaclab_arena_examples.policy.base_rsl_rl_policy as base_rsl_rl_policy
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.scene.scene import Scene
-        from isaaclab_arena.utils.pose import Pose
 
-        from arena_envs.touch_assets import TouchSphere
+        from arena_envs.touch_assets import make_touch_spheres
         from arena_envs.touch_task import TouchTaskRL
 
-        # Minimal scene: ground to stand on, a light, and the floating touch target.
+        # Minimal scene: ground to stand on, a light, and the floating touch targets.
         ground_plane = self.asset_registry.get_asset_by_name("ground_plane")()
         light = self.asset_registry.get_asset_by_name("light")()
         # concatenate_observation_terms=True gives the RL policy a flat observation vector.
         embodiment = self.asset_registry.get_asset_by_name("franka_ik")(concatenate_observation_terms=True)
 
-        # The target floats (kinematic) in front of the robot. The default position is a
-        # reachable spot for the Franka; tune with --sphere_x/--sphere_y/--sphere_z. With
-        # sphere_spawn_radius > 0 the sphere re-spawns at a uniform random point inside a
-        # ball around that position on every per-env reset (handled by the asset).
-        touch_sphere = TouchSphere(
-            initial_pose=Pose(
-                position_xyz=(args_cli.sphere_x, args_cli.sphere_y, args_cli.sphere_z),
-                rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
-            ),
-            touch_force_threshold=args_cli.touch_force_threshold,
-            spawn_radius=args_cli.sphere_spawn_radius,
-        )
+        center = (args_cli.sphere_x, args_cli.sphere_y, args_cli.sphere_z)
+        half = args_cli.scatter_half_extent
+        half_extent = (half, half, half)
 
-        scene = Scene(assets=[ground_plane, light, touch_sphere])
+        # N floating kinematic spheres; the task scatters them with min-separation on reset.
+        touch_spheres = make_touch_spheres(
+            num_spheres=args_cli.num_spheres,
+            region_center=center,
+            region_half_extent=half_extent,
+            touch_force_threshold=args_cli.touch_force_threshold,
+        )
+        # Task owns per-episode placement; disable each asset's default fixed-pose reset event.
+        for sphere in touch_spheres:
+            sphere.disable_reset_pose()
+
+        scene = Scene(assets=[ground_plane, light, *touch_spheres])
 
         isaaclab_arena_environment = IsaacLabArenaEnvironment(
             name=self.name,
             embodiment=embodiment,
             scene=scene,
             task=TouchTaskRL(
-                touch_object=touch_sphere,
+                touch_objects=touch_spheres,
                 embodiment=embodiment,
                 rl_training_mode=args_cli.rl_training_mode,
+                scatter_region_center=center,
+                scatter_region_half_extent=half_extent,
+                min_separation=args_cli.min_separation,
             ),
             rl_framework_entry_point="rsl_rl_cfg_entry_point",
             rl_policy_cfg=f"{base_rsl_rl_policy.__name__}:RLPolicyCfg",
@@ -69,9 +73,9 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
         parser.add_argument("--sphere_y", type=float, default=0.0)
         parser.add_argument("--sphere_z", type=float, default=0.3)
         parser.add_argument("--touch_force_threshold", type=float, default=1.0)
-        parser.add_argument(
-            "--sphere_spawn_radius",
-            type=float,
-            default=0.2,
-            help="Uniform-in-ball radius (m) around sphere_x/y/z for per-env spawn randomisation. 0 = fixed pose.",
-        )
+        parser.add_argument("--num_spheres", type=int, default=3,
+                            help="Number of touch targets to spawn.")
+        parser.add_argument("--scatter_half_extent", type=float, default=0.15,
+                            help="Half-width (m) of the shared spawn box in each axis, centered on sphere_x/y/z.")
+        parser.add_argument("--min_separation", type=float, default=0.12,
+                            help="Minimum distance (m) between spheres when scattered (keep > 2*sphere_radius).")
