@@ -134,6 +134,10 @@ else
                     "-v" "$HOME/.config/osmo:/home/$(id -un)/.config/osmo"
                     "-v" "$HOME/.config/gh:/home/$(id -un)/.config/gh"
                     "-v" "$HOME/.cache:/home/$(id -un)/.cache"
+                    # Persist Isaac Sim shader and CUDA compute caches across container runs.
+                    # Without these, shader recompilation adds several minutes to every cold start.
+                    "-v" "$HOME/.isaac-sim-kit-cache:/isaac-sim/kit/cache"
+                    "-v" "$HOME/.nv:/home/$(id -un)/.nv"
                     "-v" "/tmp:/tmp"
                     "-v" "/tmp/.X11-unix:/tmp/.X11-unix:rw"
                     "-v" "/var/run/docker.sock:/var/run/docker.sock"
