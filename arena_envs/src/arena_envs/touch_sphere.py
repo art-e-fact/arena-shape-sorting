@@ -34,20 +34,17 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
         embodiment = self.asset_registry.get_asset_by_name("franka_ik")(concatenate_observation_terms=True)
 
         # The target floats (kinematic) in front of the robot. The default position is a
-        # reachable spot for the Franka; tune with --sphere_x/--sphere_y/--sphere_z.
-        spawn_radius = args_cli.sphere_spawn_radius
+        # reachable spot for the Franka; tune with --sphere_x/--sphere_y/--sphere_z. With
+        # sphere_spawn_radius > 0 the sphere re-spawns at a uniform random point inside a
+        # ball around that position on every per-env reset (handled by the asset).
         touch_sphere = TouchSphere(
             initial_pose=Pose(
                 position_xyz=(args_cli.sphere_x, args_cli.sphere_y, args_cli.sphere_z),
                 rotation_xyzw=(0.0, 0.0, 0.0, 1.0),
             ),
             touch_force_threshold=args_cli.touch_force_threshold,
+            spawn_radius=args_cli.sphere_spawn_radius,
         )
-        # When radius > 0 the task registers a per-env ball-randomisation event that
-        # writes the root pose itself; disable the default fixed-pose reset event so
-        # the two don't fight each other.
-        if spawn_radius > 0.0:
-            touch_sphere.disable_reset_pose()
 
         scene = Scene(assets=[ground_plane, light, touch_sphere])
 
@@ -59,7 +56,6 @@ class TouchSphereEnvironment(ExampleEnvironmentBase):
                 touch_object=touch_sphere,
                 embodiment=embodiment,
                 rl_training_mode=args_cli.rl_training_mode,
-                sphere_spawn_radius=spawn_radius,
             ),
             rl_framework_entry_point="rsl_rl_cfg_entry_point",
             rl_policy_cfg=f"{base_rsl_rl_policy.__name__}:RLPolicyCfg",
