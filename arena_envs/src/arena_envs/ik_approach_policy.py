@@ -69,7 +69,7 @@ class IkApproachPolicy(PolicyBase):
         quat = wp.to_torch(ee.data.target_quat_w)[0, 0]
         return PoseUtils.make_pose(pos, PoseUtils.matrix_from_quat(quat.unsqueeze(0))[0])
 
-    def _delta_action(self, base, target_pose: torch.Tensor, gripper: float = 1.0) -> torch.Tensor:
+    def _delta_action(self, base, target_pose: torch.Tensor, gripper: float = -1.0) -> torch.Tensor:
         """Turn a 4x4 world target pose into a clamped relative-pose action (1, 7)."""
         import isaaclab.utils.math as PoseUtils
 
