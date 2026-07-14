@@ -24,7 +24,7 @@ class StrawberryPlant(LibraryObject, Pollenateable):
 
     name = "strawberry_plant"
     tags = ["object", "pollenateable"]
-    usd_path = str(_REPO_ROOT / "assets" / "strawberry_raw.usda")
+    usd_path = str(_REPO_ROOT / "assets" / "strawberry_raw.usd")
     object_type = ObjectType.BASE
 
 

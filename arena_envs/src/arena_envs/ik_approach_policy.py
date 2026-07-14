@@ -6,8 +6,10 @@ targets. Orientation is ignored for now: only the xyz position of each frame is
 used, and the current EE orientation is held.
 
 For each target, cuRobo plans a collision-free EE path once; the policy follows
-every waypoint in that plan via the planner's iterator, then holds at the goal
-with differential IK until the frame is latched as reached.
+every waypoint in that plan via the planner's iterator, then drives differential
+IK to the authored approach-frame pose. A frame is marked done only after that
+full path completes — not when the EE merely enters the task's wider reach
+threshold (which would allow stopping short of the approach site).
 
 Emits the differential-IK arm action layout ``[dpos(3), drot(3), gripper(1)]``.
 Assumes a single environment (env 0) with the Franka base at the world origin.
@@ -51,11 +53,19 @@ class IkApproachPolicy(PolicyBase):
         super().__init__(config)
         self._planner = None
         self._active_target_idx: int | None = None
+        # Frames whose full planned approach path has completed this episode.
+        self._reached: set[int] = set()
+        self._fresh_episode = True
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if self._planner is not None:
             self._planner.reset_plan()
         self._active_target_idx = None
+        self._reached = set()
+        # After success, the env observation can still expose all ``reached_flags`` as
+        # True on the first step of the new episode. Ignore them until we latch from
+        # geometry on our own (same pattern as ``ScriptedTouchPolicy``).
+        self._fresh_episode = True
 
     # -- helpers ---------------------------------------------------------------
 
@@ -129,27 +139,46 @@ class IkApproachPolicy(PolicyBase):
     def _has_active_plan(self) -> bool:
         return self._planner is not None and self._planner.has_next_waypoint()
 
+    def _at_approach_pose(self, ee_pos: torch.Tensor, goal_pose: torch.Tensor) -> bool:
+        """True when the EE is on the authored approach-frame position.
+
+        Uses one commanded step as tolerance — intentionally tighter than the task
+        ``reach_threshold`` so we finish the planned path instead of stopping early.
+        """
+        return torch.norm(goal_pose[:3, 3] - ee_pos) < 0.001
+
     # -- main ------------------------------------------------------------------
 
     def get_action(self, env, observation) -> torch.Tensor:
         base = env.unwrapped
-        poses_b, reached_flags = self._parse_task_obs(observation["task_obs"])
+        poses_b, _reached_flags = self._parse_task_obs(observation["task_obs"])
         frame_targets_w = self._waypoints_w(base, poses_b)
         ee_pose = self._ee_pose_w(base)
         ee_pos = ee_pose[:3, 3]
 
-        reached = {i for i, flag in enumerate(reached_flags) if flag > 0.5}
-        remaining = [i for i in range(len(frame_targets_w)) if i not in reached]
+        if self._fresh_episode:
+            remaining = list(range(len(frame_targets_w)))
+            self._fresh_episode = False
+        else:
+            remaining = [i for i in range(len(frame_targets_w)) if i not in self._reached]
         if not remaining:
             return self._delta_action(base, ee_pose)
 
+        # Follow every cuRobo waypoint before considering the approach pose reached.
         if self._has_active_plan():
             target_pose = self._curobo_pose_to_matrix(self._planner.get_next_waypoint_ee_pose())
             return self._delta_action(base, target_pose)
 
-        # Plan exhausted: hold at the current goal until it is latched as reached.
+        # Plan exhausted (or planning fell back to straight-line): settle on the
+        # actual approach-frame pose, then latch — do not use task reach_threshold.
         if self._active_target_idx is not None and self._active_target_idx in remaining:
-            return self._delta_action(base, frame_targets_w[self._active_target_idx])
+            goal = frame_targets_w[self._active_target_idx]
+            if self._at_approach_pose(ee_pos, goal):
+                self._reached.add(self._active_target_idx)
+                self._active_target_idx = None
+                if self._planner is not None:
+                    self._planner.reset_plan()
+            return self._delta_action(base, goal)
 
         self._active_target_idx = min(
             remaining,
