@@ -24,7 +24,6 @@ from isaaclab_arena.assets.register import register_task
 from isaaclab_arena.embodiments.embodiment_base import EmbodimentBase
 from isaaclab_arena.tasks.observations import observations
 from isaaclab_arena.tasks.pick_and_place_task import PickAndPlaceTask, TerminationsCfg
-from isaaclab_arena.tasks.rewards import rewards
 from isaaclab_arena.tasks.terminations import (
     SuccessMode,
     check_success,
@@ -60,6 +59,28 @@ class ObjectHeightGainReward(_SpawnHeightLatch):
 
     def __call__(self, env, object_cfg: SceneEntityCfg, std: float) -> torch.Tensor:
         return torch.tanh(self.height_gain(env, object_cfg) / std)
+
+
+def gripper_object_distance(
+    env: ManagerBasedEnv,
+    std: float,
+    object_cfg: SceneEntityCfg,
+    robot_cfg: SceneEntityCfg,
+    ee_body_name: str,
+) -> torch.Tensor:
+    """Reach reward using the gripper body, matching Droid policy observations.
+
+    Arena's ``object_ee_distance`` reads ``ee_frame`` target index 0, which on the
+    Droid embodiment is anchored to ``panda_link0`` (shoulder) rather than the
+    gripper. Arm motion barely changes that signal, so RL gets no reach gradient.
+    """
+    object_asset = env.scene[object_cfg.name]
+    robot = env.scene[robot_cfg.name]
+    body_idx = robot.data.body_names.index(ee_body_name)
+    object_pos_w = wp.to_torch(object_asset.data.root_pos_w)
+    ee_pos_w = wp.to_torch(robot.data.body_pos_w)[:, body_idx, :]
+    distance = torch.norm(object_pos_w - ee_pos_w, dim=1)
+    return 1.0 - torch.tanh(distance / std)
 
 
 def object_to_destination_distance(
@@ -133,6 +154,7 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
         episode_length_s: float | None = 20.0,
         rl_training_mode: bool = True,
         lift_height_std: float = 0.02,
+        ee_body_name: str = "base_link",
         force_threshold: float = 0.1,
         velocity_threshold: float = 0.1,
         max_separation: tuple[float, float, float] | None = (0.10, 0.10, 0.20),
@@ -148,6 +170,7 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
             episode_length_s: Episode length in seconds.
             rl_training_mode: If True, success does not end the episode early.
             lift_height_std: Tanh scale for the continuous lift reward [m].
+            ee_body_name: Robot body used for the reach reward (Droid gripper: ``base_link``).
             force_threshold: Contact force threshold for placement success.
             velocity_threshold: Velocity threshold for placement success.
             max_separation: Optional (x, y, z) proximity thresholds for bowl placement.
@@ -156,6 +179,7 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
         self.rl_training_mode = rl_training_mode
         self.embodiment = embodiment
         self.lift_height_std = lift_height_std
+        self.ee_body_name = ee_body_name
 
         super().__init__(
             pick_up_object=pick_up_object,
@@ -169,7 +193,6 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
         )
 
         robot_name = embodiment.get_embodiment_name_in_scene()
-        ee_frame_name = embodiment.get_ee_frame_name(embodiment.get_arm_mode())
 
         self.observation_cfg = PickAndPlaceObservationsCfg(
             pick_up_object=pick_up_object,
@@ -180,7 +203,8 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
             pick_up_object=pick_up_object,
             destination_location=destination_location,
             lift_height_std=self.lift_height_std,
-            ee_frame_name=ee_frame_name,
+            robot_name=robot_name,
+            ee_body_name=self.ee_body_name,
         )
         self.termination_cfg = self._make_rl_termination_cfg()
 
@@ -269,16 +293,18 @@ class PickAndPlaceRewardCfg:
         pick_up_object: Asset,
         destination_location: Asset,
         lift_height_std: float,
-        ee_frame_name: str,
+        robot_name: str,
+        ee_body_name: str,
     ):
         self.reaching_object = RewardTermCfg(
-            func=rewards.object_ee_distance,
+            func=gripper_object_distance,
             params={
                 "std": 0.1,
                 "object_cfg": SceneEntityCfg(pick_up_object.name),
-                "ee_frame_cfg": SceneEntityCfg(ee_frame_name),
+                "robot_cfg": SceneEntityCfg(robot_name),
+                "ee_body_name": ee_body_name,
             },
-            weight=1.0,
+            weight=5.0,
         )
         # Continuous lift shaping: small height gains produce non-zero reward immediately.
         self.lifting_object = RewardTermCfg(

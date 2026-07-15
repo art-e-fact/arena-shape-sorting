@@ -22,7 +22,7 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     """Configure the Maple-table pick-and-place environment."""
 
     enable_cameras: bool = False
-    embodiment: str = "droid_abs_joint_pos"
+    embodiment: str = "droid_rel_joint_pos"
     hdr: str | None = None
     light_intensity: float = 500.0
     pick_up_object: str = "rubiks_cube_hot3d_robolab"
@@ -50,6 +50,10 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.scene.scene import Scene
 
         from shape_sorting.pick_and_place_task import PickAndPlaceTaskRL
+
+        # Procedural assets pull in isaaclab.sim; register only after SimulationApp is up.
+        if cfg.pick_up_object == "shape_piece" or "shape_piece" in cfg.additional_table_objects:
+            import shape_sorting.shape_asset  # noqa: F401 — triggers @register_asset
 
         # Step 1: Retrieve assets from the registry
         background = self.asset_registry.get_asset_by_name("maple_table_robolab")()
