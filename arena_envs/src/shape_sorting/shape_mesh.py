@@ -41,35 +41,13 @@ def bounding_box_from_mesh_data(mesh: MeshData) -> AxisAlignedBoundingBox:
 
 
 def box_mesh_data(size: tuple[float, float, float]) -> MeshData:
-    """Return a centered axis-aligned box as 12 triangles."""
+    """Return a centered axis-aligned box tessellated via build123d."""
+    from build123d import Box
+
     sx, sy, sz = size
-    hx, hy, hz = sx * 0.5, sy * 0.5, sz * 0.5
-    vertices = (
-        (-hx, -hy, -hz),
-        (hx, -hy, -hz),
-        (hx, hy, -hz),
-        (-hx, hy, -hz),
-        (-hx, -hy, hz),
-        (hx, -hy, hz),
-        (hx, hy, hz),
-        (-hx, hy, hz),
-    )
-    triangles = (
-        (0, 1, 2),
-        (0, 2, 3),
-        (4, 6, 5),
-        (4, 7, 6),
-        (0, 4, 5),
-        (0, 5, 1),
-        (2, 6, 7),
-        (2, 7, 3),
-        (0, 3, 7),
-        (0, 7, 4),
-        (1, 5, 6),
-        (1, 6, 2),
-    )
+    vertices, triangles = Box(sx, sy, sz).tessellate(tolerance=1e-3)
     return MeshData(
-        vertices=vertices,
+        vertices=tuple((float(v.X), float(v.Y), float(v.Z)) for v in vertices),
         face_vertex_counts=(3,) * len(triangles),
         face_vertex_indices=tuple(index for tri in triangles for index in tri),
     )

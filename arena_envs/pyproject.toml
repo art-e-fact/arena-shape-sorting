@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "isaaclab_arena",
     "junit-xml",
+    "build123d",
 ]
 
 [tool.setuptools.packages.find]
