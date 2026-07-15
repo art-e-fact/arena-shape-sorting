@@ -113,7 +113,8 @@ RUN /isaac-sim/python.sh -m pip install -e "${ARENA_PATH}/[dev]"
 # Install pollenating-demo package
 ################################
 COPY arena_envs ${WORKDIR}/arena_envs
-RUN /isaac-sim/python.sh -m pip install -e "${WORKDIR}/arena_envs"
+RUN /isaac-sim/python.sh -m pip install junit-xml && \
+    /isaac-sim/python.sh -m pip install -e "${WORKDIR}/arena_envs"
 
 RUN echo "alias python='/isaac-sim/python.sh'" >> /etc/bash.bashrc
 RUN echo "alias pip3='/isaac-sim/python.sh -m pip'" >> /etc/bash.bashrc

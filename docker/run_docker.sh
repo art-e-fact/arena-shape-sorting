@@ -156,6 +156,7 @@ else
                     "--env" "NV_CXR_RUNTIME_DIR=/cloudxr/run"
                     "--env" "ISAACLAB_PATH=${WORKDIR}/submodules/IsaacLab-Arena/submodules/IsaacLab"
                     "--env" "REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt"
+                    "--env" "MODELS_DIR=/workspace/pretrained_ckpts"
                     )
 
     if [ -n "$OMNI_PASS" ]; then

@@ -1,0 +1,64 @@
+project: artefacts/IsaacLab-Arena-experiments
+
+version: 0.1.0
+
+jobs:
+  unit_tests:
+    type: test
+    timeout: 15 # minutes
+    package:
+      docker:
+        build:
+          dockerfile: empty
+    runtime:
+      framework: other
+      simulator: isaac_sim
+      
+    scenarios:
+      settings:
+        - name: navigator_unit_tests
+          pytest_file: "nodes/navigator/tests"
+          
+        - name: policy_controller_unit_tests
+          pytest_file: "nodes/policy_controller/tests"
+  
+  eval:
+    type: test
+    timeout: 20 # minutes
+    package:
+      docker:
+        build:
+          dockerfile: empty
+    runtime:
+      framework: other
+      simulator: isaac_sim
+      
+    scenarios:
+      defaults: # Global to all scenarios, and overriden in specific scenarios.
+        output_dirs: ["/tmp/outputs"]
+      settings:
+        - name: arena_policy_evaluation_test_newton
+          metrics: metrics.json
+          run: |
+            rm -rf /tmp/outputs && mkdir -p /tmp/outputs && ./docker/run_docker.sh 'cd /workspaces/pollenating-demo && /isaac-sim/python.sh arena_envs/src/shape_sorting/run_policy.py \
+              --viz kit \
+              --presets newton \
+              --policy_type rsl_rl \
+              --num_steps 800 \
+              --output_base_dir /tmp/outputs \
+              --record_viewport_video \
+              --checkpoint_path /workspaces/pollenating-demo/logs/rsl_rl/dexsuite_kuka_allegro/2026-07-14_11-49-36/model_14999.pt \
+              dexsuite_lift'
+        
+        - name: arena_policy_evaluation_test_physx
+          metrics: metrics.json
+          run: |
+            rm -rf /tmp/outputs && mkdir -p /tmp/outputs && ./docker/run_docker.sh 'cd /workspaces/pollenating-demo && /isaac-sim/python.sh arena_envs/src/shape_sorting/run_policy.py \
+              --viz kit \
+              --presets physx \
+              --policy_type rsl_rl \
+              --num_steps 800 \
+              --output_base_dir /tmp/outputs \
+              --record_viewport_video \
+              --checkpoint_path /workspaces/pollenating-demo/logs/rsl_rl/dexsuite_kuka_allegro/2026-07-14_11-49-36/model_14999.pt \
+              dexsuite_lift'

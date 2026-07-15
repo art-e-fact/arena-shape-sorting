@@ -1,0 +1,31 @@
+{
+    "jobs": [
+      {
+        "name": "dexsuite_lift_7500",
+        "arena_env_args": {
+          "environment": "dexsuite_lift",
+          "num_envs": 64,
+          "env_spacing": 3
+        },
+        "num_steps": 5000,
+        "policy_type": "rsl_rl",
+        "policy_config_dict": {
+            "checkpoint_path": "logs/rsl_rl/dexsuite_kuka_allegro/2026-07-14_11-49-36/model_7500.pt"
+        }
+      },
+      {
+        "name": "dexsuite_lift_14999",
+        "arena_env_args": {
+          "environment": "dexsuite_lift",
+          "num_envs": 64,
+          "env_spacing": 3
+        },
+        "num_steps": 5000,
+        "policy_type": "rsl_rl",
+        "policy_config_dict": {
+            "checkpoint_path": "logs/rsl_rl/dexsuite_kuka_allegro/2026-07-14_11-49-36/model_14999.pt"
+        }
+      }
+    ]
+  }
+  
