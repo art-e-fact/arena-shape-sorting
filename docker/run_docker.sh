@@ -151,6 +151,16 @@ else
                     "--env" "DOCKER_RUN_USER_NAME=$(id -un)"
                     "--env" "DOCKER_RUN_GROUP_ID=$(id -g)"
                     "--env" "DOCKER_RUN_GROUP_NAME=$(id -gn)"
+                    )
+
+    # Pass host "input" GID so entrypoint can grant /dev/input/event* access for gamepads.
+    INPUT_GID="$(getent group input | cut -d: -f3 || true)"
+    if [ -n "$INPUT_GID" ]; then
+        DOCKER_RUN_ARGS+=("--env" "DOCKER_RUN_INPUT_GID=${INPUT_GID}")
+        DOCKER_RUN_ARGS+=("--group-add" "${INPUT_GID}")
+    fi
+
+    DOCKER_RUN_ARGS+=(
                     "-v" "${CXR_HOST_VOLUME_PATH:-$HOME/.cloudxr}:/cloudxr"
                     "--env" "XR_RUNTIME_JSON=/cloudxr/openxr_cloudxr.json"
                     "--env" "NV_CXR_RUNTIME_DIR=/cloudxr/run"

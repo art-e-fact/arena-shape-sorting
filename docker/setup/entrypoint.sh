@@ -13,11 +13,22 @@ userdel ubuntu 2>/dev/null || true
 
 groupadd --force --gid "$DOCKER_RUN_GROUP_ID" "$DOCKER_RUN_GROUP_NAME"
 
+# Match host /dev/input group (evdev nodes are typically root:input mode 660).
+# Kit/carb gamepad reads event* devices, not world-readable js* nodes.
+EXTRA_GROUPS="sudo,isaac-sim"
+if [ -n "${DOCKER_RUN_INPUT_GID:-}" ]; then
+    if ! getent group "${DOCKER_RUN_INPUT_GID}" >/dev/null; then
+        groupadd --gid "${DOCKER_RUN_INPUT_GID}" input
+    fi
+    INPUT_GROUP_NAME="$(getent group "${DOCKER_RUN_INPUT_GID}" | cut -d: -f1)"
+    EXTRA_GROUPS="${EXTRA_GROUPS},${INPUT_GROUP_NAME}"
+fi
+
 useradd --no-log-init \
         --create-home \
         --uid "$DOCKER_RUN_USER_ID" \
         --gid "$DOCKER_RUN_GROUP_NAME" \
-        --groups sudo,isaac-sim \
+        --groups "$EXTRA_GROUPS" \
         --shell /bin/bash \
         $DOCKER_RUN_USER_NAME
 chown $DOCKER_RUN_USER_NAME:$DOCKER_RUN_GROUP_NAME /home/$DOCKER_RUN_USER_NAME
