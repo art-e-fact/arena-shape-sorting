@@ -13,27 +13,32 @@ from typing import TYPE_CHECKING
 from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
+from shape_sorting.shape_forms import DEFAULT_FORMS, ShapeForm
+
 if TYPE_CHECKING:
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
 
 
 @dataclass
 class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
-    """Configure the Maple-table pick-and-place environment."""
+    """Configure the shape-sorting pick-and-place environment."""
 
     enable_cameras: bool = False
     embodiment: str = "droid_rel_joint_pos"
     hdr: str | None = None
     light_intensity: float = 500.0
-    pick_up_object: str = "rubiks_cube_hot3d_robolab"
-    destination_location: str = "bowl_ycb_robolab"
     additional_table_objects: list[str] = field(default_factory=list)
     rl_training_mode: bool = False
+    forms: list[ShapeForm] = field(default_factory=lambda: list(DEFAULT_FORMS))
+    piece_size: float = 0.05
+    piece_height: float = 0.02
+    box_height: float = 0.06
+    clearance: float = 0.003
 
 
 @register_environment
 class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg]):
-    """Registered provider for the Maple-table pick-and-place environment."""
+    """Registered provider for the procedural shape-sorting environment."""
 
     name: str = "shape_sorting_test"
     _legacy_argparse_cfg_type = ShapeSortingEnvironmentCfg
@@ -50,17 +55,21 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.scene.scene import Scene
 
         from shape_sorting.pick_and_place_task import PickAndPlaceTaskRL
+        from shape_sorting.shape_asset import make_shape_sorting_layout
 
-        # Procedural assets pull in isaaclab.sim; register only after SimulationApp is up.
-        if cfg.pick_up_object == "shape_piece" or "shape_piece" in cfg.additional_table_objects:
-            import shape_sorting.shape_asset  # noqa: F401 — triggers @register_asset
-
-        # Step 1: Retrieve assets from the registry
+        # Step 1: Retrieve assets from the registry / build the sorting layout.
         background = self.asset_registry.get_asset_by_name("maple_table_robolab")()
-        pick_up_object = self.asset_registry.get_asset_by_name(cfg.pick_up_object)()
-        destination_location = self.asset_registry.get_asset_by_name(cfg.destination_location)()
+        layout = make_shape_sorting_layout(
+            forms=cfg.forms,
+            piece_size=cfg.piece_size,
+            piece_height=cfg.piece_height,
+            box_height=cfg.box_height,
+            clearance=cfg.clearance,
+        )
+        pick_up_object = layout.pick_up_piece
+        destination_location = layout.box
 
-        # Step 2: Describe spatial relationships
+        # Step 2: Describe spatial relationships.
         table_reference = ObjectReference(
             name="table",
             prim_path="{ENV_REGEX_NS}/maple_table_robolab/table",
@@ -69,8 +78,8 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         )
         table_reference.add_relation(IsAnchor())
 
-        pick_up_object.add_relation(On(table_reference))
-        destination_location.add_relation(On(table_reference))
+        for asset in layout.assets():
+            asset.add_relation(On(table_reference))
 
         additional_table_objects = [
             self.asset_registry.get_asset_by_name(name)() for name in cfg.additional_table_objects
@@ -78,7 +87,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         for obj in additional_table_objects:
             obj.add_relation(On(table_reference))
 
-        # Step 3: Configure lighting
+        # Step 3: Configure lighting.
         light = self.asset_registry.get_asset_by_name("light")()
         light.set_intensity(cfg.light_intensity)
         if cfg.hdr is not None:
@@ -93,15 +102,14 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         # Droid does not wire concatenate_observation_terms into its obs cfg yet.
         embodiment.observation_config.policy.concatenate_terms = True
 
-        # Step 5: Compose the scene
+        # Step 5: Compose the scene.
         scene = Scene(
             assets=[
                 background,
                 light,
                 directional_light,
-                pick_up_object,
-                destination_location,
                 table_reference,
+                *layout.assets(),
                 *additional_table_objects,
             ]
         )
@@ -116,12 +124,12 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             rl_training_mode=cfg.rl_training_mode,
         )
 
-        # Set viewport camera to match the robolab droid view
+        # Set viewport camera to match the robolab droid view.
         def _set_viewer_cfg(env_cfg):
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
             return env_cfg
 
-        # Step 7: Assemble the environment
+        # Step 7: Assemble the environment.
         isaaclab_arena_environment = IsaacLabArenaEnvironment(
             name=self.name,
             embodiment=embodiment,
