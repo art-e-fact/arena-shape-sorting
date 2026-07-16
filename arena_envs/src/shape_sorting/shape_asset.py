@@ -48,7 +48,7 @@ def make_shape_piece_spawn_cfg(
         ),
         collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005),
         mass_props=sim_utils.MassPropertiesCfg(mass=0.05),
-        collision_approximation="convexHull",
+        collision_approximation="sdf",
         activate_contact_sensors=True,
     )
 

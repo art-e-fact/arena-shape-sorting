@@ -99,10 +99,21 @@ def write_usd_mesh(stage: Usd.Stage, prim_path: str, mesh: MeshData) -> None:
 def _apply_mesh_collision(stage: Usd.Stage, mesh_prim_path: str, approximation: str, cfg) -> None:
     from pxr import UsdPhysics
 
+    from isaaclab.sim.schemas import schemas_cfg
+
     if cfg.collision_props is None:
         return
-    mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(stage.GetPrimAtPath(mesh_prim_path))
-    mesh_collision_api.GetApproximationAttr().Set(approximation)
+
+    if approximation == "sdf":
+        # MeshCollisionAPI(approximation=sdf) alone is not enough; PhysX also needs
+        # PhysxSDFMeshCollisionAPI (resolution, etc.) for cooking / debug viz.
+        schemas.define_mesh_collision_properties(
+            mesh_prim_path, schemas_cfg.SDFMeshPropertiesCfg(), stage=stage
+        )
+    else:
+        mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(stage.GetPrimAtPath(mesh_prim_path))
+        mesh_collision_api.GetApproximationAttr().Set(approximation)
+
     schemas.define_collision_properties(mesh_prim_path, cfg.collision_props, stage=stage)
 
 
@@ -321,12 +332,12 @@ def build_sorting_box_parts(
     lid = lid_builder.part.translate((0.0, 0.0, z_lid))
 
     parts = (
-        MeshPart("bottom", mesh_data_from_solid(bottom, tolerance), "convexHull"),
-        MeshPart("front", mesh_data_from_solid(front, tolerance), "convexHull"),
-        MeshPart("back", mesh_data_from_solid(back, tolerance), "convexHull"),
-        MeshPart("left", mesh_data_from_solid(left, tolerance), "convexHull"),
-        MeshPart("right", mesh_data_from_solid(right, tolerance), "convexHull"),
+        MeshPart("bottom", mesh_data_from_solid(bottom, tolerance), "boundingCube"),
+        MeshPart("front", mesh_data_from_solid(front, tolerance), "boundingCube"),
+        MeshPart("back", mesh_data_from_solid(back, tolerance), "boundingCube"),
+        MeshPart("left", mesh_data_from_solid(left, tolerance), "boundingCube"),
+        MeshPart("right", mesh_data_from_solid(right, tolerance), "boundingCube"),
         # Concave lid: keep holes traversable for insertion.
-        MeshPart("lid", mesh_data_from_solid(lid, tolerance), "convexDecomposition"),
+        MeshPart("lid", mesh_data_from_solid(lid, tolerance), "sdf"),
     )
     return parts, hole_centers
