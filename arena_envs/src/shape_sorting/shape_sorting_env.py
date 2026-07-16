@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
-from shape_sorting.shape_forms import DEFAULT_FORMS, ShapeForm
+from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
 
 if TYPE_CHECKING:
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
@@ -34,6 +34,8 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     piece_height: float = 0.02
     box_height: float = 0.06
     clearance: float = 0.003
+    edge_chamfer: float = DEFAULT_EDGE_CHAMFER
+    hole_chamfer: float = DEFAULT_HOLE_CHAMFER
 
 
 @register_environment
@@ -65,6 +67,8 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             piece_height=cfg.piece_height,
             box_height=cfg.box_height,
             clearance=cfg.clearance,
+            edge_chamfer=cfg.edge_chamfer,
+            hole_chamfer=cfg.hole_chamfer,
         )
         pick_up_object = layout.pick_up_piece
         destination_location = layout.box

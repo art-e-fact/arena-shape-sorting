@@ -17,7 +17,7 @@ from isaaclab_arena.assets.register import register_asset
 from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 from isaaclab_arena.utils.pose import Pose
 
-from shape_sorting.shape_forms import DEFAULT_FORMS, ShapeForm
+from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
 from shape_sorting.shape_mesh import (
     ProceduralAssemblyCfg,
     ProceduralMeshCfg,
@@ -33,12 +33,14 @@ def make_shape_piece_spawn_cfg(
     size: float = 0.05,
     height: float = 0.05,
     color: tuple[float, float, float] = (0.85, 0.35, 0.15),
+    edge_chamfer: float = DEFAULT_EDGE_CHAMFER,
 ) -> ProceduralMeshCfg:
     """Physics/visual spawn settings for a small rigid shape piece."""
     return ProceduralMeshCfg(
         form=form,
         size=size,
         height=height,
+        edge_chamfer=edge_chamfer,
         visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
         physics_material=sim_utils.RigidBodyMaterialCfg(static_friction=0.5),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
@@ -96,10 +98,12 @@ class ShapePiece(Object):
         prim_path: str | None = None,
         initial_pose: Pose | None = None,
         color: tuple[float, float, float] | None = None,
+        edge_chamfer: float = DEFAULT_EDGE_CHAMFER,
     ):
         self.form = form
         self.size = size
         self.height = height
+        self.edge_chamfer = edge_chamfer
         self.color = color if color is not None else _PIECE_COLORS[0]
         resolved_name = instance_name if instance_name is not None else f"shape_piece_{form.value}"
         resolved_prim = prim_path if prim_path is not None else f"{{ENV_REGEX_NS}}/{resolved_name}"
@@ -115,7 +119,9 @@ class ShapePiece(Object):
     def _generate_rigid_cfg(self) -> RigidObjectCfg:
         cfg = RigidObjectCfg(
             prim_path=self.prim_path,
-            spawn=make_shape_piece_spawn_cfg(self.form, self.size, self.height, self.color),
+            spawn=make_shape_piece_spawn_cfg(
+                self.form, self.size, self.height, self.color, edge_chamfer=self.edge_chamfer
+            ),
             **self.asset_cfg_addon,
         )
         return self._add_initial_pose_to_cfg(cfg)
@@ -123,7 +129,9 @@ class ShapePiece(Object):
     def get_bounding_box(self) -> AxisAlignedBoundingBox:
         """Local bounds from procedural mesh vertices (no backing USD file)."""
         if self.bounding_box is None:
-            self.bounding_box = bounding_box_from_mesh_data(form_mesh_data(self.form, self.size, self.height))
+            self.bounding_box = bounding_box_from_mesh_data(
+                form_mesh_data(self.form, self.size, self.height, edge_chamfer=self.edge_chamfer)
+            )
         return self.bounding_box
 
     def get_corners(self, pos: torch.Tensor) -> torch.Tensor:
@@ -159,6 +167,7 @@ class SortingBox(Object):
         lid_thickness: float = 0.006,
         bottom_thickness: float = 0.006,
         hole_gap: float = 0.012,
+        hole_chamfer: float = DEFAULT_HOLE_CHAMFER,
         instance_name: str | None = None,
         prim_path: str | None = None,
         initial_pose: Pose | None = None,
@@ -171,6 +180,7 @@ class SortingBox(Object):
         self.lid_thickness = lid_thickness
         self.bottom_thickness = bottom_thickness
         self.hole_gap = hole_gap
+        self.hole_chamfer = hole_chamfer
 
         self._parts, self.hole_centers = build_sorting_box_parts(
             forms=self.forms,
@@ -181,6 +191,7 @@ class SortingBox(Object):
             lid_thickness=self.lid_thickness,
             bottom_thickness=self.bottom_thickness,
             hole_gap=self.hole_gap,
+            hole_chamfer=self.hole_chamfer,
         )
 
         resolved_name = instance_name if instance_name is not None else "sorting_box"
@@ -233,6 +244,8 @@ class ShapeSortingLayout:
     piece_height: float
     box_height: float
     clearance: float
+    edge_chamfer: float
+    hole_chamfer: float
     box: SortingBox
     pieces: list[ShapePiece]
 
@@ -256,6 +269,8 @@ def make_shape_sorting_layout(
     lid_thickness: float = 0.006,
     bottom_thickness: float = 0.006,
     hole_gap: float = 0.012,
+    edge_chamfer: float = DEFAULT_EDGE_CHAMFER,
+    hole_chamfer: float = DEFAULT_HOLE_CHAMFER,
 ) -> ShapeSortingLayout:
     """Build a sorting box and matching pieces from shared sizing parameters.
 
@@ -273,6 +288,7 @@ def make_shape_sorting_layout(
         lid_thickness=lid_thickness,
         bottom_thickness=bottom_thickness,
         hole_gap=hole_gap,
+        hole_chamfer=hole_chamfer,
     )
     pieces = [
         ShapePiece(
@@ -281,6 +297,7 @@ def make_shape_sorting_layout(
             height=piece_height,
             instance_name=f"shape_piece_{form.value}",
             color=_PIECE_COLORS[i % len(_PIECE_COLORS)],
+            edge_chamfer=edge_chamfer,
         )
         for i, form in enumerate(forms_t)
     ]
@@ -290,6 +307,8 @@ def make_shape_sorting_layout(
         piece_height=piece_height,
         box_height=box_height,
         clearance=clearance,
+        edge_chamfer=edge_chamfer,
+        hole_chamfer=hole_chamfer,
         box=box,
         pieces=pieces,
     )

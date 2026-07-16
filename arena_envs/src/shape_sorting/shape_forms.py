@@ -11,20 +11,25 @@ import math
 from enum import Enum
 
 from build123d import (
-    Align,
+    Axis,
     BuildPart,
     BuildSketch,
-    Box,
     Circle,
-    Cylinder,
     Mode,
     Polygon,
     Rectangle,
     RegularPolygon,
     Vector,
+    chamfer,
     extrude,
     offset,
 )
+
+DEFAULT_EDGE_CHAMFER = 0.001
+"""Default top/bottom plan-edge chamfer on sorting pieces (m)."""
+
+DEFAULT_HOLE_CHAMFER = 0.001
+"""Default lead-in chamfer on lid hole rims (m)."""
 
 
 class ShapeForm(Enum):
@@ -37,6 +42,8 @@ class ShapeForm(Enum):
     STAR = "star"
     CROSS = "cross"
 
+
+_CHAMFER_SKIP_FORMS = frozenset({ShapeForm.STAR, ShapeForm.CROSS})
 
 DEFAULT_FORMS: tuple[ShapeForm, ...] = (
     ShapeForm.CUBE,
@@ -61,6 +68,39 @@ def _star_points(outer_r: float, inner_r: float, n: int = 5) -> list[Vector]:
     return pts
 
 
+def clamp_piece_edge_chamfer(edge_chamfer: float, size: float, height: float) -> float:
+    """Clamp piece chamfer so it stays below local width and height limits."""
+    if edge_chamfer <= 0.0:
+        return 0.0
+    return min(edge_chamfer, height * 0.45, size * 0.08)
+
+
+def clamp_hole_chamfer(hole_chamfer: float, lid_thickness: float) -> float:
+    """Clamp lid hole rim chamfer to a fraction of lid thickness."""
+    if hole_chamfer <= 0.0:
+        return 0.0
+    return min(hole_chamfer, lid_thickness * 0.45)
+
+
+def tessellation_tolerance(*, edge_chamfer: float = 0.0, hole_chamfer: float = 0.0) -> float:
+    """Use a finer tessellation tolerance when chamfers are active."""
+    if edge_chamfer > 0.0 or hole_chamfer > 0.0:
+        return 5e-4
+    return 1e-3
+
+
+def _chamfer_top_bottom_plan_edges(builder: BuildPart, length: float) -> None:
+    """Chamfer the highest and lowest Z edge groups (plan perimeters)."""
+    if length <= 0.0:
+        return
+    edges_by_z = builder.edges().group_by(Axis.Z)
+    if not edges_by_z:
+        return
+    chamfer(edges_by_z[-1], length=length)
+    if len(edges_by_z) > 1:
+        chamfer(edges_by_z[0], length=length)
+
+
 def add_form_profile(form: ShapeForm, size: float) -> None:
     """Add the plan-view profile of ``form`` into the active :class:`BuildSketch`."""
     half = size * 0.5
@@ -82,17 +122,27 @@ def add_form_profile(form: ShapeForm, size: float) -> None:
         raise ValueError(f"Unsupported shape form: {form}")
 
 
-def piece_solid(form: ShapeForm, size: float, height: float):
-    """Return a centered solid for a manipulable sorting piece."""
-    if form is ShapeForm.CUBE:
-        return Box(size, size, height, align=(Align.CENTER, Align.CENTER, Align.CENTER))
-    if form is ShapeForm.CYLINDER:
-        return Cylinder(size * 0.5, height, align=(Align.CENTER, Align.CENTER, Align.CENTER))
+def piece_solid(
+    form: ShapeForm,
+    size: float,
+    height: float,
+    edge_chamfer: float = DEFAULT_EDGE_CHAMFER,
+):
+    """Return a centered solid for a manipulable sorting piece.
 
+    When ``edge_chamfer`` is positive, top and bottom plan perimeters are chamfered.
+    """
+    clamped = clamp_piece_edge_chamfer(edge_chamfer, size, height)
     with BuildPart() as part:
         with BuildSketch():
             add_form_profile(form, size)
         extrude(amount=height)
+        if clamped > 0.0 and form not in _CHAMFER_SKIP_FORMS:
+            try:
+                _chamfer_top_bottom_plan_edges(part, clamped)
+            except Exception:
+                # Re-entrant silhouettes can fail at large chamfers; keep the sharp solid.
+                pass
     return _center_on_origin(part.part)
 
 

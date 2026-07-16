@@ -21,7 +21,15 @@ from isaaclab.utils import configclass
 
 from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 
-from shape_sorting.shape_forms import ShapeForm, hole_cutter, piece_solid, tessellate_solid
+from shape_sorting.shape_forms import (
+    DEFAULT_EDGE_CHAMFER,
+    DEFAULT_HOLE_CHAMFER,
+    ShapeForm,
+    hole_cutter,
+    piece_solid,
+    tessellate_solid,
+    tessellation_tolerance,
+)
 
 if TYPE_CHECKING:
     from pxr import Usd
@@ -80,9 +88,17 @@ def mesh_data_from_solid(solid, tolerance: float = 1e-3) -> MeshData:
     )
 
 
-def form_mesh_data(form: ShapeForm, size: float, height: float, tolerance: float = 1e-3) -> MeshData:
+def form_mesh_data(
+    form: ShapeForm,
+    size: float,
+    height: float,
+    edge_chamfer: float = DEFAULT_EDGE_CHAMFER,
+    tolerance: float | None = None,
+) -> MeshData:
     """Tessellate a sorting piece of the given form."""
-    return mesh_data_from_solid(piece_solid(form, size, height), tolerance=tolerance)
+    if tolerance is None:
+        tolerance = tessellation_tolerance(edge_chamfer=edge_chamfer)
+    return mesh_data_from_solid(piece_solid(form, size, height, edge_chamfer=edge_chamfer), tolerance=tolerance)
 
 
 def write_usd_mesh(stage: Usd.Stage, prim_path: str, mesh: MeshData) -> None:
@@ -159,6 +175,9 @@ class ProceduralMeshCfg(MeshCfg):
     height: float = 0.05
     """Extrusion along Z (m)."""
 
+    edge_chamfer: float = DEFAULT_EDGE_CHAMFER
+    """Top/bottom plan-edge chamfer on the piece (m)."""
+
     mesh_data: MeshData | None = None
     """Explicit mesh; when set, overrides ``form`` / ``size`` / ``height``."""
 
@@ -191,7 +210,7 @@ class ProceduralAssemblyCfg(RigidObjectSpawnerCfg):
 def _mesh_for_piece_cfg(cfg: ProceduralMeshCfg) -> MeshData:
     if cfg.mesh_data is not None:
         return cfg.mesh_data
-    return form_mesh_data(cfg.form, cfg.size, cfg.height)
+    return form_mesh_data(cfg.form, cfg.size, cfg.height, edge_chamfer=cfg.edge_chamfer)
 
 
 @clone
@@ -254,7 +273,8 @@ def build_sorting_box_parts(
     lid_thickness: float = 0.006,
     bottom_thickness: float = 0.006,
     hole_gap: float = 0.012,
-    tolerance: float = 1e-3,
+    hole_chamfer: float = DEFAULT_HOLE_CHAMFER,
+    tolerance: float | None = None,
 ) -> tuple[tuple[MeshPart, ...], tuple[tuple[float, float], ...]]:
     """Build wall / lid / bottom meshes and return hole XY centers in box frame.
 
@@ -262,10 +282,16 @@ def build_sorting_box_parts(
     through. Outer XY size is derived from ``piece_size``, ``clearance``, and the
     number of forms. The assembly AABB is centered on the origin.
     """
-    from build123d import Align, Box, BuildPart, Location, Mode, add
+    from build123d import Align, Axis, Box, BuildPart, Location, Mode, Select, add, chamfer
+
+    from shape_sorting.shape_forms import clamp_hole_chamfer
 
     if not forms:
         raise ValueError("Sorting box requires at least one form.")
+
+    clamped_hole_chamfer = clamp_hole_chamfer(hole_chamfer, lid_thickness)
+    if tolerance is None:
+        tolerance = tessellation_tolerance(hole_chamfer=clamped_hole_chamfer)
 
     hole_span = piece_size + 2.0 * clearance
     pitch = hole_span + hole_gap
@@ -329,6 +355,13 @@ def build_sorting_box_parts(
         for (hx, hy), form in zip(hole_centers, forms):
             cutter = hole_cutter(form, piece_size, clearance, cut_depth=lid_thickness * 2.0)
             add(cutter.moved(Location((hx, hy, 0.0))), mode=Mode.SUBTRACT)
+            if clamped_hole_chamfer > 0.0:
+                try:
+                    top_rim = lid_builder.edges(Select.LAST).group_by(Axis.Z)[-1]
+                    if top_rim:
+                        chamfer(top_rim, length=clamped_hole_chamfer)
+                except Exception:
+                    pass
     lid = lid_builder.part.translate((0.0, 0.0, z_lid))
 
     parts = (
