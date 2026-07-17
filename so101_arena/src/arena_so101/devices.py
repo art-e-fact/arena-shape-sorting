@@ -1,16 +1,30 @@
-"""SO-101 leader as an Arena teleop device name.
-
-Arena's built-in teleop path expects SE3 devices. The physical SO-101 leader
-outputs joint positions via LeRobot, so use ``python -m arena_so101.teleop_leader``
-for the real control loop. This registration keeps the device discoverable by name.
-"""
+"""SO-101 teleop device registrations for Arena."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 
+from isaaclab.devices import Se3GamepadCfg
 from isaaclab_arena.assets.device_library import TeleopDeviceBase
 from isaaclab_arena.assets.register import register_device
+
+
+@register_device
+class GamepadCfg(TeleopDeviceBase):
+    """SE(3) gamepad teleop (Arena device_library has no gamepad entry)."""
+
+    name = "gamepad"
+
+    def __init__(self, sim_device: str | None = None, pos_sensitivity: float = 0.1, rot_sensitivity: float = 0.1):
+        super().__init__(sim_device=sim_device)
+        self.pos_sensitivity = pos_sensitivity
+        self.rot_sensitivity = rot_sensitivity
+
+    def get_device_cfg(self, pipeline_builder: Callable | None = None, embodiment: object | None = None) -> Se3GamepadCfg:
+        return Se3GamepadCfg(
+            pos_sensitivity=self.pos_sensitivity,
+            rot_sensitivity=self.rot_sensitivity,
+        )
 
 
 @register_device
