@@ -3,11 +3,16 @@
 ``size`` is the plan-view characteristic length (bounding-circle diameter for
 polygons, side length for the square, outer width for the cross). ``height`` is
 the Z extrusion. Hole cutters inflate the plan profile by ``clearance``.
+
+Layout-level ``piece_size`` is the side length of an equal-area reference square;
+each form's actual ``size`` is derived via :func:`size_for_equal_area` so every
+piece has the same plan-view area.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from enum import Enum
 
 from build123d import (
@@ -99,6 +104,25 @@ def _chamfer_top_bottom_plan_edges(builder: BuildPart, length: float) -> None:
     chamfer(edges_by_z[-1], length=length)
     if len(edges_by_z) > 1:
         chamfer(edges_by_z[0], length=length)
+
+
+def profile_area(form: ShapeForm, size: float) -> float:
+    """Plan-view area of ``form`` at the given characteristic ``size``."""
+    with BuildSketch() as sk:
+        add_form_profile(form, size)
+    return float(sk.sketch.area)
+
+
+def size_for_equal_area(form: ShapeForm, reference_size: float) -> float:
+    """Characteristic ``size`` so plan area equals a square of side ``reference_size``."""
+    target = reference_size**2
+    unit = profile_area(form, 1.0)
+    return math.sqrt(target / unit)
+
+
+def sizes_for_equal_area(forms: Sequence[ShapeForm], reference_size: float) -> tuple[float, ...]:
+    """Per-form characteristic sizes that share the reference square's plan area."""
+    return tuple(size_for_equal_area(form, reference_size) for form in forms)
 
 
 def add_form_profile(form: ShapeForm, size: float) -> None:

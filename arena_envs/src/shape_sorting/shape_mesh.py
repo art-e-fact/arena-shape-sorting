@@ -266,7 +266,7 @@ def spawn_procedural_assembly(
 
 def build_sorting_box_parts(
     forms: Sequence[ShapeForm],
-    piece_size: float,
+    form_sizes: Sequence[float],
     box_height: float,
     clearance: float,
     wall_thickness: float = 0.008,
@@ -279,8 +279,9 @@ def build_sorting_box_parts(
     """Build wall / lid / bottom meshes and return hole XY centers in box frame.
 
     The lid is a plate with each piece profile inflated by ``clearance`` and cut
-    through. Outer XY size is derived from ``piece_size``, ``clearance``, and the
-    number of forms. The assembly AABB is centered on the origin.
+    through. Outer XY size is derived from the largest ``form_sizes`` entry,
+    ``clearance``, and the number of forms. The assembly AABB is centered on the
+    origin.
     """
     from build123d import Align, Axis, Box, BuildPart, Location, Mode, Select, add, chamfer
 
@@ -288,12 +289,17 @@ def build_sorting_box_parts(
 
     if not forms:
         raise ValueError("Sorting box requires at least one form.")
+    if len(forms) != len(form_sizes):
+        raise ValueError(
+            f"forms and form_sizes length mismatch: {len(forms)} forms vs {len(form_sizes)} sizes."
+        )
 
     clamped_hole_chamfer = clamp_hole_chamfer(hole_chamfer, lid_thickness)
     if tolerance is None:
         tolerance = tessellation_tolerance(hole_chamfer=clamped_hole_chamfer)
 
-    hole_span = piece_size + 2.0 * clearance
+    max_form_size = max(form_sizes)
+    hole_span = max_form_size + 2.0 * clearance
     pitch = hole_span + hole_gap
     n = len(forms)
     inner_x = n * pitch + hole_gap
@@ -352,8 +358,8 @@ def build_sorting_box_parts(
             lid_thickness,
             align=(Align.CENTER, Align.CENTER, Align.CENTER),
         )
-        for (hx, hy), form in zip(hole_centers, forms):
-            cutter = hole_cutter(form, piece_size, clearance, cut_depth=lid_thickness * 2.0)
+        for (hx, hy), form, form_size in zip(hole_centers, forms, form_sizes):
+            cutter = hole_cutter(form, form_size, clearance, cut_depth=lid_thickness * 2.0)
             add(cutter.moved(Location((hx, hy, 0.0))), mode=Mode.SUBTRACT)
             if clamped_hole_chamfer > 0.0:
                 try:

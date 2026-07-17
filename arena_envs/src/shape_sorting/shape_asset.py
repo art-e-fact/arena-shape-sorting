@@ -17,7 +17,13 @@ from isaaclab_arena.assets.register import register_asset
 from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 from isaaclab_arena.utils.pose import Pose
 
-from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
+from shape_sorting.shape_forms import (
+    DEFAULT_EDGE_CHAMFER,
+    DEFAULT_FORMS,
+    DEFAULT_HOLE_CHAMFER,
+    ShapeForm,
+    sizes_for_equal_area,
+)
 from shape_sorting.shape_mesh import (
     ProceduralAssemblyCfg,
     ProceduralMeshCfg,
@@ -150,7 +156,8 @@ class SortingBox(Object):
 
     Side walls, bottom, and lid are authored as separate mesh prims under
     ``geometry/<part>/mesh`` so contact filters can target individual faces.
-    Outer size is derived from ``forms``, ``piece_size``, and ``clearance``.
+    Outer size is derived from ``forms``, per-form ``form_sizes``, and
+    ``clearance``.
     """
 
     name = "sorting_box"
@@ -160,6 +167,7 @@ class SortingBox(Object):
     def __init__(
         self,
         forms: Sequence[ShapeForm] = DEFAULT_FORMS,
+        form_sizes: Sequence[float] | None = None,
         piece_size: float = 0.05,
         box_height: float = 0.06,
         clearance: float = 0.003,
@@ -174,6 +182,13 @@ class SortingBox(Object):
     ):
         self.forms = tuple(forms)
         self.piece_size = piece_size
+        self.form_sizes = (
+            tuple(form_sizes) if form_sizes is not None else sizes_for_equal_area(self.forms, piece_size)
+        )
+        if len(self.forms) != len(self.form_sizes):
+            raise ValueError(
+                f"forms and form_sizes length mismatch: {len(self.forms)} forms vs {len(self.form_sizes)} sizes."
+            )
         self.box_height = box_height
         self.clearance = clearance
         self.wall_thickness = wall_thickness
@@ -184,7 +199,7 @@ class SortingBox(Object):
 
         self._parts, self.hole_centers = build_sorting_box_parts(
             forms=self.forms,
-            piece_size=self.piece_size,
+            form_sizes=self.form_sizes,
             box_height=self.box_height,
             clearance=self.clearance,
             wall_thickness=self.wall_thickness,
@@ -241,6 +256,7 @@ class ShapeSortingLayout:
 
     forms: tuple[ShapeForm, ...]
     piece_size: float
+    form_sizes: tuple[float, ...]
     piece_height: float
     box_height: float
     clearance: float
@@ -274,13 +290,15 @@ def make_shape_sorting_layout(
 ) -> ShapeSortingLayout:
     """Build a sorting box and matching pieces from shared sizing parameters.
 
-    The box derives its footprint from ``forms`` / ``piece_size`` / ``clearance``.
-    Each piece uses the same ``piece_size`` and ``piece_height``, with a distinct
-    color per form index.
+    ``piece_size`` is the side length of an equal-area reference square. Each
+    form's characteristic size is derived so all pieces share that plan area.
+    The box footprint uses the largest derived size plus ``clearance``.
     """
     forms_t = tuple(forms)
+    form_sizes = sizes_for_equal_area(forms_t, piece_size)
     box = SortingBox(
         forms=forms_t,
+        form_sizes=form_sizes,
         piece_size=piece_size,
         box_height=box_height,
         clearance=clearance,
@@ -293,17 +311,18 @@ def make_shape_sorting_layout(
     pieces = [
         ShapePiece(
             form=form,
-            size=piece_size,
+            size=form_size,
             height=piece_height,
             instance_name=f"shape_piece_{form.value}",
             color=_PIECE_COLORS[i % len(_PIECE_COLORS)],
             edge_chamfer=edge_chamfer,
         )
-        for i, form in enumerate(forms_t)
+        for i, (form, form_size) in enumerate(zip(forms_t, form_sizes))
     ]
     return ShapeSortingLayout(
         forms=forms_t,
         piece_size=piece_size,
+        form_sizes=form_sizes,
         piece_height=piece_height,
         box_height=box_height,
         clearance=clearance,
