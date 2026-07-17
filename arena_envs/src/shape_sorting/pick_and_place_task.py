@@ -154,7 +154,7 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
         episode_length_s: float | None = 20.0,
         rl_training_mode: bool = True,
         lift_height_std: float = 0.02,
-        ee_body_name: str = "base_link",
+        ee_body_name: str | None = None,
         force_threshold: float = 0.1,
         velocity_threshold: float = 0.1,
         max_separation: tuple[float, float, float] | None = (0.10, 0.10, 0.20),
@@ -170,7 +170,9 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
             episode_length_s: Episode length in seconds.
             rl_training_mode: If True, success does not end the episode early.
             lift_height_std: Tanh scale for the continuous lift reward [m].
-            ee_body_name: Robot body used for the reach reward (Droid gripper: ``base_link``).
+            ee_body_name: Robot body for the reach reward. Defaults to the
+                embodiment's ``get_reach_body_name()`` when present, else
+                ``base_link`` (Droid Robotiq gripper).
             force_threshold: Contact force threshold for placement success.
             velocity_threshold: Velocity threshold for placement success.
             max_separation: Optional (x, y, z) proximity thresholds for bowl placement.
@@ -179,6 +181,9 @@ class PickAndPlaceTaskRL(PickAndPlaceTask):
         self.rl_training_mode = rl_training_mode
         self.embodiment = embodiment
         self.lift_height_std = lift_height_std
+        if ee_body_name is None:
+            getter = getattr(embodiment, "get_reach_body_name", None)
+            ee_body_name = getter() if callable(getter) else "base_link"
         self.ee_body_name = ee_body_name
 
         super().__init__(

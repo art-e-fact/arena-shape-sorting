@@ -59,6 +59,17 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from shape_sorting.pick_and_place_task import PickAndPlaceTaskRL
         from shape_sorting.shape_asset import make_shape_sorting_layout
 
+        # SO-101 embodiments live in the arena_so101 package (so101_arena/ project).
+        if cfg.embodiment.startswith("so101"):
+            import arena_so101
+
+            if not hasattr(arena_so101, "register"):
+                raise ImportError(
+                    "import arena_so101 did not load the package (got a shadowed path). "
+                    "Install with: /isaac-sim/python.sh -m pip install -e so101_arena"
+                )
+            arena_so101.register()
+
         # Step 1: Retrieve assets from the registry / build the sorting layout.
         background = self.asset_registry.get_asset_by_name("maple_table_robolab")()
         layout = make_shape_sorting_layout(
