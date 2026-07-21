@@ -15,7 +15,7 @@ After ``SimulationApp`` is running, register once:
 
 ```python
 import arena_so101
-arena_so101.register()  # so101_abs_joint, so101_rel_joint, so101_ik, so101_leader
+arena_so101.register()  # so101_abs_joint, so101_rel_joint, so101_ik, so101_leader, gamepad
 ```
 
 Then use like any Arena embodiment:
@@ -30,26 +30,23 @@ embodiment = asset_registry.get_asset_by_name("so101_abs_joint")(enable_cameras=
 |------|---------|
 | `so101_abs_joint` | Absolute joint positions (best for leader teleop) |
 | `so101_rel_joint` | Relative joint positions |
-| `so101_ik` | Relative SE(3) differential IK + binary Jaw gripper (keyboard/spacemouse/gamepad) |
+| `so101_ik` | Relative SE(3) differential IK + binary Jaw (keyboard / gamepad / spacemouse) |
 
 USD joints (workshop naming): `Rotation`, `Pitch`, `Elbow`, `Wrist_Pitch`, `Wrist_Roll`, `Jaw`.
 
 Wrist camera is a Python `TiledCameraCfg` on `Robot/gripper/gripper_cam` (enabled with `enable_cameras=True`).
 
-## SE(3) teleop (`so101_ik`)
+`so101_ik` is a 5-DOF arm: DLS tracks EE position and does best-effort orientation on the 6D pose command.
 
-Use Arena's teleop runners with `--embodiment so101_ik` and `--teleop_device keyboard`, `spacemouse`, or `gamepad`:
+## SE(3) teleop
 
 ```bash
 python -m shape_sorting.run_teleop \
-  --viz kit \
-  --num_envs 1 \
+  --viz kit --num_envs 1 \
   shape_sorting_test \
   --embodiment so101_ik \
-  --teleop_device gamepad
+  --teleop_device gamepad   # or keyboard / spacemouse
 ```
-
-The 5-DOF arm tracks position exactly and orientation best-effort under differential IK.
 
 ## Leader teleop
 
@@ -59,3 +56,4 @@ python -m arena_so101.teleop_leader --port /dev/ttyACM0 --id leader \
 ```
 
 Maps LeRobot leader degrees → sim radians by joint index (same order as the workshop).
+Use a joint embodiment (`so101_abs_joint`), not `so101_ik`.

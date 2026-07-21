@@ -1,4 +1,4 @@
-"""Retargeter entries for SO-101 embodiments and SE(3) teleop devices."""
+"""Retargeter entries pairing teleop devices with SO-101 embodiments."""
 
 from __future__ import annotations
 

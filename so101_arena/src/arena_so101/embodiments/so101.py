@@ -35,11 +35,21 @@ from isaaclab_arena.utils.pose import Pose
 
 from arena_so101.mapping import SIM_JOINT_NAMES
 
-# Arm joints only (Jaw is controlled separately as a binary gripper term).
-SIM_ARM_JOINT_NAMES = SIM_JOINT_NAMES[:-1]
-
 _DATA_DIR = Path(__file__).parent / "data"
 _USD_PATH = str(_DATA_DIR / "SO-ARM101-USD.usd")
+
+# Arm joints only (Jaw is a separate binary gripper term for IK).
+_ARM_JOINT_NAMES = (
+    "Rotation",
+    "Pitch",
+    "Elbow",
+    "Wrist_Pitch",
+    "Wrist_Roll",
+)
+
+# USD Jaw limits from the NVIDIA workshop (degrees → radians).
+_JAW_OPEN_RAD = math.radians(100.0)
+_JAW_CLOSE_RAD = math.radians(-10.0)
 
 # 90° yaw about Z (x, y, z, w).
 _YAW_90 = (0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4))
@@ -94,26 +104,27 @@ _SO101_CFG = ArticulationCfg(
     },
 )
 
-# High-PD variant for differential IK (gravity off, stiffer arm tracking).
+# High-PD / gravity-off copy for differential IK (same idea as FRANKA_PANDA_HIGH_PD_CFG).
 _SO101_IK_CFG = _SO101_CFG.copy()
-_SO101_IK_CFG.spawn.rigid_props = sim_utils.RigidBodyPropertiesCfg(
-    disable_gravity=True,
-    max_depenetration_velocity=5.0,
-)
+_SO101_IK_CFG.spawn.rigid_props.disable_gravity = True
 _SO101_IK_CFG.actuators = {
     "rotation": ImplicitActuatorCfg(
-        joint_names_expr=["Rotation"], effort_limit_sim=30, stiffness=110, damping=1.4
+        joint_names_expr=["Rotation"], effort_limit_sim=30, stiffness=400, damping=80
     ),
-    "pitch": ImplicitActuatorCfg(joint_names_expr=["Pitch"], effort_limit_sim=30, stiffness=60, damping=1.6),
-    "elbow": ImplicitActuatorCfg(joint_names_expr=["Elbow"], effort_limit_sim=30, stiffness=50, damping=1.4),
+    "pitch": ImplicitActuatorCfg(
+        joint_names_expr=["Pitch"], effort_limit_sim=30, stiffness=400, damping=80
+    ),
+    "elbow": ImplicitActuatorCfg(
+        joint_names_expr=["Elbow"], effort_limit_sim=30, stiffness=400, damping=80
+    ),
     "wrist_pitch": ImplicitActuatorCfg(
-        joint_names_expr=["Wrist_Pitch"], effort_limit_sim=30, stiffness=24, damping=1.0
+        joint_names_expr=["Wrist_Pitch"], effort_limit_sim=30, stiffness=200, damping=40
     ),
     "wrist_roll": ImplicitActuatorCfg(
-        joint_names_expr=["Wrist_Roll"], effort_limit_sim=30, stiffness=14, damping=1.0
+        joint_names_expr=["Wrist_Roll"], effort_limit_sim=30, stiffness=200, damping=40
     ),
     "gripper": ImplicitActuatorCfg(
-        joint_names_expr=["Jaw"], effort_limit_sim=30, stiffness=4, damping=0.3
+        joint_names_expr=["Jaw"], effort_limit_sim=30, stiffness=20, damping=2
     ),
 }
 
@@ -157,9 +168,11 @@ class SO101RelJointActionsCfg:
 
 @configclass
 class SO101IKActionsCfg:
+    """Relative SE(3) arm + binary Jaw — matches keyboard / gamepad / spacemouse teleop."""
+
     arm_action: ActionTermCfg = DifferentialInverseKinematicsActionCfg(
         asset_name="robot",
-        joint_names=list(SIM_ARM_JOINT_NAMES),
+        joint_names=list(_ARM_JOINT_NAMES),
         body_name="gripper",
         controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
         scale=0.5,
@@ -169,8 +182,8 @@ class SO101IKActionsCfg:
     gripper_action: ActionTermCfg = BinaryJointPositionActionCfg(
         asset_name="robot",
         joint_names=["Jaw"],
-        open_command_expr={"Jaw": math.radians(100.0)},
-        close_command_expr={"Jaw": math.radians(-10.0)},
+        open_command_expr={"Jaw": _JAW_OPEN_RAD},
+        close_command_expr={"Jaw": _JAW_CLOSE_RAD},
     )
 
 
@@ -280,7 +293,7 @@ class SO101RelJointEmbodiment(SO101EmbodimentBase):
 
 @register_asset
 class SO101IKEmbodiment(SO101EmbodimentBase):
-    """Differential IK (relative SE(3)) + binary Jaw gripper."""
+    """Differential IK (relative SE(3)) arm control + binary Jaw gripper."""
 
     name = "so101_ik"
 
