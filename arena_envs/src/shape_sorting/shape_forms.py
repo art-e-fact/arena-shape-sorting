@@ -53,7 +53,7 @@ _CHAMFER_SKIP_FORMS = frozenset({ShapeForm.STAR, ShapeForm.CROSS})
 DEFAULT_FORMS: tuple[ShapeForm, ...] = (
     ShapeForm.CUBE,
     ShapeForm.CYLINDER,
-    ShapeForm.TRIANGLE,
+    ShapeForm.CROSS,
     ShapeForm.HEXAGON,
 )
 

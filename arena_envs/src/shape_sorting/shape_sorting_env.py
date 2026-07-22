@@ -48,7 +48,6 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
     def build(self, cfg: ShapeSortingEnvironmentCfg) -> IsaacLabArenaEnvironment:
         """Build the environment from its typed configuration."""
-        import isaaclab_arena_examples.policy.base_rsl_rl_policy as base_rsl_rl_policy
         from isaaclab.envs.common import ViewerCfg
 
         from isaaclab_arena.assets.object_base import ObjectType
@@ -56,9 +55,9 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.relations.relations import IsAnchor, On, PositionLimits
         from isaaclab_arena.scene.scene import Scene
+        from isaaclab_arena.tasks.sorting_task import SortMultiObjectTask
         from isaaclab_arena.utils.pose import Pose
 
-        from shape_sorting.pick_and_place_task import PickAndPlaceTaskRL
         from shape_sorting.shape_asset import make_shape_sorting_layout
 
         # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
@@ -76,7 +75,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
                 )
             arena_so101.register()
 
-        # Step 1: Retrieve assets from the registry / build the sorting layout.
+        # Retrieve assets from the registry / build the sorting layout.
         background = self.asset_registry.get_asset_by_name("maple_table_robolab")()
         layout = make_shape_sorting_layout(
             forms=cfg.forms,
@@ -87,8 +86,8 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             edge_chamfer=cfg.edge_chamfer,
             hole_chamfer=cfg.hole_chamfer,
         )
-        pick_up_object = layout.pick_up_piece
-        destination_location = layout.box
+        pieces = layout.pieces
+        box = layout.box
 
         # Describe spatial relationships.
         table_reference = ObjectReference(
@@ -104,7 +103,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
         for asset in layout.pieces:
             asset.add_relation(On(table_reference))
-            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.62, y_min=0.01, y_max=0.32))
+            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.52, y_min=0.01, y_max=0.28))
 
         additional_table_objects = [
             self.asset_registry.get_asset_by_name(name)() for name in cfg.additional_table_objects
@@ -112,7 +111,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         for obj in additional_table_objects:
             obj.add_relation(On(table_reference))
 
-        # Step 3: Configure lighting.
+        # Configure lighting.
         light = self.asset_registry.get_asset_by_name("light")()
         light.set_intensity(cfg.light_intensity)
         if cfg.hdr is not None:
@@ -157,22 +156,21 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             ]
         )
 
-        # Step 6: Define the RL task (dense rewards + placement success).
-        task = PickAndPlaceTaskRL(
-            pick_up_object=pick_up_object,
-            destination_location=destination_location,
+        # Place-all task: every piece must contact the shared sorting box.
+        task = SortMultiObjectTask(
+            pick_up_object_list=pieces,
+            destination_location_list=[box] * len(pieces),
             background_scene=background,
-            embodiment=embodiment,
-            episode_length_s=20.0,
-            rl_training_mode=cfg.rl_training_mode,
+            episode_length_s=120.0,
         )
+        task.termination_cfg.success.params["force_threshold"] = 0.1
 
         # Set viewport camera to match the robolab droid view.
         def _set_viewer_cfg(env_cfg):
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
             return env_cfg
 
-        # Step 7: Assemble the environment.
+        # Assemble the environment.
         isaaclab_arena_environment = IsaacLabArenaEnvironment(
             name=self.name,
             embodiment=embodiment,
@@ -180,8 +178,6 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             task=task,
             teleop_device=teleop_device,
             env_cfg_callback=_set_viewer_cfg,
-            rl_framework_entry_point="rsl_rl_cfg_entry_point",
-            rl_policy_cfg=f"{base_rsl_rl_policy.__name__}:RLPolicyCfg",
         )
         return isaaclab_arena_environment
 
