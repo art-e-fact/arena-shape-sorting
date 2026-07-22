@@ -51,3 +51,6 @@ python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/recor
   --teleop_device so101_leader \
   --leader_port /dev/ttyACM0
 ```
+
+Notes:
+ - Pass `--forms cube cylinder triangle hexagon star cross` to change the shapes used
