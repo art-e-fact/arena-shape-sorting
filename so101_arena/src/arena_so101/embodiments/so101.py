@@ -70,7 +70,7 @@ _SO101_CFG = ArticulationCfg(
         ),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(-0.05, 0.0, 0.0),
+        pos=(0.0, 0.0, 0.0),
         rot=_YAW_90,
         joint_pos={
             "Rotation": -0.2736,

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from isaaclab_arena.assets.register import register_environment
+from isaaclab_arena.utils.pose import Pose
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
 from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
@@ -32,15 +32,14 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     additional_table_objects: list[str] = field(default_factory=list)
     rl_training_mode: bool = False
     forms: list[ShapeForm] = field(default_factory=lambda: list(DEFAULT_FORMS))
-    piece_size: float = 0.05
-    piece_height: float = 0.02
-    box_height: float = 0.06
+    piece_size: float = 0.03
+    piece_height: float = 0.03
+    box_height: float = 0.04
     clearance: float = 0.003
     edge_chamfer: float = DEFAULT_EDGE_CHAMFER
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER
 
 
-@register_environment
 class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg]):
     """Registered provider for the procedural shape-sorting environment."""
 
@@ -120,6 +119,16 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             enable_cameras=cfg.enable_cameras,
             concatenate_observation_terms=True,
         )
+
+        # Set the initial pose for the SO-101 to sit on the side of the table.
+        if "so101" in cfg.embodiment:
+            embodiment.set_initial_pose(
+                Pose(
+                    position_xyz=(0.236, 0.0, -0.027),
+                    rotation_xyzw=embodiment.scene_config.robot.init_state.rot,
+                )
+            )
+
         # Droid does not wire concatenate_observation_terms into its obs cfg yet.
         embodiment.observation_config.policy.concatenate_terms = True
 
