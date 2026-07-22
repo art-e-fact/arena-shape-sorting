@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from isaaclab_arena.utils.pose import Pose
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
 from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
@@ -27,6 +26,7 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     teleop_device: str | None = None
     leader_port: str = "/dev/ttyACM0"
     leader_id: str = "leader"
+    leader_recalibrate: bool = False
     hdr: str | None = None
     light_intensity: float = 500.0
     additional_table_objects: list[str] = field(default_factory=list)
@@ -54,8 +54,9 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.assets.object_base import ObjectType
         from isaaclab_arena.assets.object_reference import ObjectReference
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
-        from isaaclab_arena.relations.relations import IsAnchor, On
+        from isaaclab_arena.relations.relations import IsAnchor, On, PositionLimits
         from isaaclab_arena.scene.scene import Scene
+        from isaaclab_arena.utils.pose import Pose
 
         from shape_sorting.pick_and_place_task import PickAndPlaceTaskRL
         from shape_sorting.shape_asset import make_shape_sorting_layout
@@ -89,7 +90,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         pick_up_object = layout.pick_up_piece
         destination_location = layout.box
 
-        # Step 2: Describe spatial relationships.
+        # Describe spatial relationships.
         table_reference = ObjectReference(
             name="table",
             prim_path="{ENV_REGEX_NS}/maple_table_robolab/table",
@@ -98,8 +99,12 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         )
         table_reference.add_relation(IsAnchor())
 
-        for asset in layout.assets():
+        layout.box.add_relation(On(table_reference))
+        layout.box.add_relation(PositionLimits(x_min=0.5, x_max=0.55, y_min=-0.101, y_max=-0.05))
+
+        for asset in layout.pieces:
             asset.add_relation(On(table_reference))
+            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.62, y_min=0.01, y_max=0.32))
 
         additional_table_objects = [
             self.asset_registry.get_asset_by_name(name)() for name in cfg.additional_table_objects
@@ -114,7 +119,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             light.add_hdr(self.hdr_registry.get_hdr_by_name(cfg.hdr)())
         directional_light = self.asset_registry.get_asset_by_name("directional_light")()
 
-        # Step 4: Select the embodiment (flat obs vector for RL policy input).
+        # Select the embodiment (flat obs vector for RL policy input).
         embodiment = self.asset_registry.get_asset_by_name(cfg.embodiment)(
             enable_cameras=cfg.enable_cameras,
             concatenate_observation_terms=True,
@@ -138,6 +143,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             if cfg.teleop_device == "so101_leader":
                 teleop_device.port = cfg.leader_port
                 teleop_device.leader_id = cfg.leader_id
+                teleop_device.leader_recalibrate = cfg.leader_recalibrate
 
         # Step 5: Compose the scene.
         scene = Scene(

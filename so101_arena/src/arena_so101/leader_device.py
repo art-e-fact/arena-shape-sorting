@@ -25,7 +25,7 @@ class SO101LeaderDevice(DeviceBase):
         self.cfg = cfg
         self._sim_device = cfg.sim_device
         self._additional_callbacks: dict[str, Callable] = {}
-        self._leader = self._connect_leader(cfg.port, cfg.leader_id)
+        self._leader = self._connect_leader(cfg.port, cfg.leader_id, cfg.leader_recalibrate)
 
         self._appwindow = omni.appwindow.get_default_app_window()
         self._input = carb.input.acquire_input_interface()
@@ -67,7 +67,7 @@ class SO101LeaderDevice(DeviceBase):
         return leader_dict_to_sim_radians(self._leader.get_action(), device=self._sim_device)
 
     @staticmethod
-    def _connect_leader(port: str, leader_id: str):
+    def _connect_leader(port: str, leader_id: str, leader_recalibrate: bool):
         try:
             from lerobot.teleoperators.so_leader import SO101Leader, SO101LeaderConfig
         except ImportError as exc:
@@ -79,7 +79,10 @@ class SO101LeaderDevice(DeviceBase):
         leader = SO101Leader(
             SO101LeaderConfig(port=port, id=leader_id, use_degrees=False)
         )
-        leader.connect()
+        leader.connect(calibrate=not leader_recalibrate)
+        if leader_recalibrate:
+            leader.calibration = {}  # skip "use existing file?" prompt
+            leader.calibrate()
         return leader
 
     def _on_keyboard_event(self, event, *args, **kwargs) -> bool:
@@ -99,6 +102,7 @@ class SO101LeaderDeviceCfg(DeviceCfg):
 
     port: str = "/dev/ttyACM0"
     leader_id: str = "leader"
+    leader_recalibrate: bool = False
     retargeters: None = None
     # {DIR} is the parent package (arena_so101), same pattern as Se3KeyboardCfg.
     class_type: type[SO101LeaderDevice] | str = "{DIR}.leader_device:SO101LeaderDevice"

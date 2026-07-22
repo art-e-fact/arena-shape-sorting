@@ -8,6 +8,7 @@ hierarchy (``Xform`` root + ``geometry/...`` children). Used by
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import MISSING, dataclass
 from typing import TYPE_CHECKING
@@ -264,6 +265,15 @@ def spawn_procedural_assembly(
     return stage.GetPrimAtPath(prim_path)
 
 
+def ideal_hole_grid(n: int) -> tuple[int, int]:
+    """Near-square ``(cols, rows)`` that fits ``n`` holes (cols >= rows when tied)."""
+    if n < 1:
+        raise ValueError("n must be >= 1")
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    return cols, rows
+
+
 def build_sorting_box_parts(
     forms: Sequence[ShapeForm],
     form_sizes: Sequence[float],
@@ -278,10 +288,8 @@ def build_sorting_box_parts(
 ) -> tuple[tuple[MeshPart, ...], tuple[tuple[float, float], ...]]:
     """Build wall / lid / bottom meshes and return hole XY centers in box frame.
 
-    The lid is a plate with each piece profile inflated by ``clearance`` and cut
-    through. Outer XY size is derived from the largest ``form_sizes`` entry,
-    ``clearance``, and the number of forms. The assembly AABB is centered on the
-    origin.
+    Holes are packed in a near-square grid; outer XY size follows ``cols`` /
+    ``rows``, the largest form, and ``clearance``. AABB is origin-centered.
     """
     from build123d import Align, Axis, Box, BuildPart, Location, Mode, Select, add, chamfer
 
@@ -300,10 +308,13 @@ def build_sorting_box_parts(
 
     max_form_size = max(form_sizes)
     hole_span = max_form_size + 2.0 * clearance
-    pitch = hole_span + hole_gap
+    pitch = hole_span + hole_gap  # center-to-center spacing
     n = len(forms)
-    inner_x = n * pitch + hole_gap
-    inner_y = hole_span + 2.0 * hole_gap
+    cols, rows = ideal_hole_grid(n)
+
+    # Margin of hole_gap around the hole cells on each side.
+    inner_x = cols * pitch + hole_gap
+    inner_y = rows * pitch + hole_gap
     outer_x = inner_x + 2.0 * wall_thickness
     outer_y = inner_y + 2.0 * wall_thickness
 
@@ -313,7 +324,14 @@ def build_sorting_box_parts(
             f"({lid_thickness + bottom_thickness})."
         )
 
-    hole_centers = tuple(((i - (n - 1) / 2.0) * pitch, 0.0) for i in range(n))
+    # Row-major grid, centered on origin (x right, y back).
+    hole_centers = tuple(
+        (
+            (i % cols - (cols - 1) / 2.0) * pitch,
+            ((rows - 1) / 2.0 - i // cols) * pitch,
+        )
+        for i in range(n)
+    )
     z_bottom = -0.5 * box_height + 0.5 * bottom_thickness
     z_lid = 0.5 * box_height - 0.5 * lid_thickness
     wall_height = box_height - lid_thickness - bottom_thickness

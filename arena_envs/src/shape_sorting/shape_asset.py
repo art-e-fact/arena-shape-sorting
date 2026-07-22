@@ -156,8 +156,8 @@ class SortingBox(Object):
 
     Side walls, bottom, and lid are authored as separate mesh prims under
     ``geometry/<part>/mesh`` so contact filters can target individual faces.
-    Outer size is derived from ``forms``, per-form ``form_sizes``, and
-    ``clearance``.
+    Outer size follows a near-square hole grid over ``forms``, sized from
+    ``form_sizes`` and ``clearance``.
     """
 
     name = "sorting_box"
@@ -292,7 +292,8 @@ def make_shape_sorting_layout(
 
     ``piece_size`` is the side length of an equal-area reference square. Each
     form's characteristic size is derived so all pieces share that plan area.
-    The box footprint uses the largest derived size plus ``clearance``.
+    The box is a near-square grid over the forms, sized from the largest
+    derived size plus ``clearance``.
     """
     forms_t = tuple(forms)
     form_sizes = sizes_for_equal_area(forms_t, piece_size)
