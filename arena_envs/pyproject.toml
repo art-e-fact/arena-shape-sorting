@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "arena-envs"
 version = "0.1.0"
-description = "Custom IsaacLab-Arena environments for pollenating-demo"
+description = "Custom IsaacLab-Arena environments for arena-shape-sorting"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

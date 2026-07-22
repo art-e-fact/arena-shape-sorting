@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 
 USER root
 
-ARG WORKDIR="/workspaces/pollenating-demo"
+ARG WORKDIR="/workspaces/arena-shape-sorting"
 ENV WORKDIR=${WORKDIR}
 WORKDIR "${WORKDIR}"
 
@@ -110,7 +110,7 @@ COPY submodules/IsaacLab-Arena/isaaclab_arena_examples ${ARENA_PATH}/isaaclab_ar
 RUN /isaac-sim/python.sh -m pip install -e "${ARENA_PATH}/[dev]"
 
 ################################
-# Install pollenating-demo package
+# Install arena-shape-sorting package
 ################################
 COPY arena_envs ${WORKDIR}/arena_envs
 RUN /isaac-sim/python.sh -m pip install -e "${WORKDIR}/arena_envs"
@@ -122,7 +122,7 @@ RUN echo "alias python='/isaac-sim/python.sh'" >> /etc/bash.bashrc
 RUN echo "alias pip3='/isaac-sim/python.sh -m pip'" >> /etc/bash.bashrc
 RUN echo "alias pytest='/isaac-sim/python.sh -m pytest'" >> /etc/bash.bashrc
 RUN echo "alias debugpy='python -Xfrozen_modules=off -m debugpy --listen localhost:5678 --wait-for-client'" >> /etc/bash.bashrc
-RUN echo "PS1='[pollenating-demo] \[\e[0;32m\]~\u \[\e[0;34m\]\w\[\e[0m\] \$ '" >> /etc/bash.bashrc
+RUN echo "PS1='[arena-shape-sorting] \[\e[0;32m\]~\u \[\e[0;34m\]\w\[\e[0m\] \$ '" >> /etc/bash.bashrc
 RUN echo "alias ll='ls -alF --color=auto'" >> /etc/bash.bashrc
 RUN echo "alias ..='cd ..'" >> /etc/bash.bashrc
 RUN cp /etc/bash.bashrc /root/.bashrc

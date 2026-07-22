@@ -4,7 +4,7 @@ This file provides guidance to AI coding agents (Claude Code, OpenAI Codex, etc.
 
 ## Project
 
-`pollenating-demo` is a project built **on top of** IsaacLab-Arena, following the "Arena in your repository" pattern: Arena is vendored unmodified as a git submodule (`submodules/IsaacLab-Arena`) and extended purely through its registration API. Our own code lives in the `arena_envs` package, which defines custom environments and registers them with Arena.
+`arena-shape-sorting` is a project built **on top of** IsaacLab-Arena, following the "Arena in your repository" pattern: Arena is vendored unmodified as a git submodule (`submodules/IsaacLab-Arena`) and extended purely through its registration API. Our own code lives in the `arena_envs` package, which defines custom environments and registers them with Arena.
 
 We consume Arena as a dependency — we do **not** develop it here. Treat everything under `submodules/IsaacLab-Arena` as read-only third-party code.
 
@@ -16,9 +16,9 @@ Multi-step workflows are captured as Agent Skills under `.agents/skills/`. When 
 
 ## Docker environment
 
-Anything that touches Isaac Sim or Arena (running environments, scripts, evaluation) runs inside this repo's Docker container. The image bundles Isaac Sim, Isaac Lab, the Arena submodule, and our `arena_envs` package (installed editable). The repo root is mounted at `/workspaces/pollenating-demo`, so host edits take effect immediately.
+Anything that touches Isaac Sim or Arena (running environments, scripts, evaluation) runs inside this repo's Docker container. The image bundles Isaac Sim, Isaac Lab, the Arena submodule, and our `arena_envs` package (installed editable). The repo root is mounted at `/workspaces/arena-shape-sorting`, so host edits take effect immediately.
 
-Each clone gets its own container (shared image `pollenating-demo:latest`, per-clone container name). **Don't hardcode the container name** — use the `dev-container` skill to build, start, attach to, discover, or exec into it.
+Each clone gets its own container (shared image `arena-shape-sorting:latest`, per-clone container name). **Don't hardcode the container name** — use the `dev-container` skill to build, start, attach to, discover, or exec into it.
 
 Start or attach (idempotent — builds the image if missing):
 
@@ -30,7 +30,7 @@ Run a command in the already-running container as the host user (not root):
 
 ```bash
 docker exec "$ARENA_CONTAINER" su $(id -un) -c \
-  "cd /workspaces/pollenating-demo && <command>"
+  "cd /workspaces/arena-shape-sorting && <command>"
 ```
 
 Inside the container, `python` is aliased to `/isaac-sim/python.sh` — prefer the explicit path in `docker exec` invocations from outside, where the alias is not active.

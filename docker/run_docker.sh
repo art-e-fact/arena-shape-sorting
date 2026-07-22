@@ -1,12 +1,12 @@
 #!/bin/bash
 set -e
-DOCKER_IMAGE_NAME='pollenating-demo'
+DOCKER_IMAGE_NAME='arena-shape-sorting'
 DOCKER_VERSION_TAG='latest'
 
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 REPO_ROOT=$( cd -- "$SCRIPT_DIR/.." && pwd )
 
-WORKDIR="/workspaces/pollenating-demo"
+WORKDIR="/workspaces/arena-shape-sorting"
 
 DATASETS_HOST_MOUNT_DIRECTORY="$HOME/datasets"
 MODELS_HOST_MOUNT_DIRECTORY="$HOME/models"
@@ -47,7 +47,7 @@ while getopts ":d:m:e:hn:rn:Rn:vn:s:" OPTION; do
             ;;
         h)
             script_name=$(basename "$0")
-            echo "Helper script to build and run the pollenating-demo Docker environment."
+            echo "Helper script to build and run the arena-shape-sorting Docker environment."
             echo ""
             echo "Usage:"
             echo "$script_name [options]"
