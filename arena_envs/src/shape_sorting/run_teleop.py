@@ -4,14 +4,22 @@ Imports the env first so ``@register_environment`` runs, then hands off to Arena
 teleop script. That avoids the double-registration crash from combining
 ``@register_environment`` with ``--external_environment_class_path``.
 
-Example::
+Examples::
 
+    # SE(3) — gamepad / keyboard / spacemouse
     python -m shape_sorting.run_teleop \\
-      --viz kit \\
-      --num_envs 1 \\
+      --viz kit --num_envs 1 \\
       shape_sorting_test \\
-      --embodiment droid_differential_ik \\
+      --embodiment so101_ik \\
       --teleop_device gamepad
+
+    # Physical SO-101 leader (absolute joints)
+    python -m shape_sorting.run_teleop \\
+      --viz kit --num_envs 1 \\
+      shape_sorting_test \\
+      --embodiment so101_abs_joint \\
+      --teleop_device so101_leader \\
+      --leader_port /dev/ttyACM0
 """
 
 from __future__ import annotations

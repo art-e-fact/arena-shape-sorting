@@ -38,22 +38,27 @@ Wrist camera is a Python `TiledCameraCfg` on `Robot/gripper/gripper_cam` (enable
 
 `so101_ik` is a 5-DOF arm: DLS tracks EE position and does best-effort orientation on the 6D pose command.
 
-## SE(3) teleop
+## Teleop
+
+Same Arena teleop path for SE(3) devices and the physical leader:
 
 ```bash
+# SE(3)
 python -m shape_sorting.run_teleop \
   --viz kit --num_envs 1 \
   shape_sorting_test \
   --embodiment so101_ik \
   --teleop_device gamepad   # or keyboard / spacemouse
+
+# Physical SO-101 leader → abs joints (needs so101_arena[leader])
+python -m shape_sorting.run_teleop \
+  --viz kit --num_envs 1 \
+  shape_sorting_test \
+  --embodiment so101_abs_joint \
+  --teleop_device so101_leader \
+  --leader_port /dev/ttyACM0
 ```
 
-## Leader teleop
-
-```bash
-python -m arena_so101.teleop_leader --port /dev/ttyACM0 --id leader \
-  --env_name <your_registered_env> ...
-```
-
-Maps LeRobot leader degrees → sim radians by joint index (same order as the workshop).
-Use a joint embodiment (`so101_abs_joint`), not `so101_ik`.
+`so101_leader` is a normal Arena/Isaac Lab device: `advance()` returns a (6,) absolute
+joint vector for `so101_abs_joint`. Also works with Arena's `record_demos.py` when the
+env wires `--teleop_device so101_leader`.

@@ -160,6 +160,13 @@ else
         DOCKER_RUN_ARGS+=("--group-add" "${INPUT_GID}")
     fi
 
+    # Pass host "dialout" GID so entrypoint can grant /dev/ttyACM* access for leader arms.
+    DIALOUT_GID="$(getent group dialout | cut -d: -f3 || true)"
+    if [ -n "$DIALOUT_GID" ]; then
+        DOCKER_RUN_ARGS+=("--env" "DOCKER_RUN_DIALOUT_GID=${DIALOUT_GID}")
+        DOCKER_RUN_ARGS+=("--group-add" "${DIALOUT_GID}")
+    fi
+
     DOCKER_RUN_ARGS+=(
                     "-v" "${CXR_HOST_VOLUME_PATH:-$HOME/.cloudxr}:/cloudxr"
                     "--env" "XR_RUNTIME_JSON=/cloudxr/openxr_cloudxr.json"

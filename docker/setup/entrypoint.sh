@@ -15,6 +15,7 @@ groupadd --force --gid "$DOCKER_RUN_GROUP_ID" "$DOCKER_RUN_GROUP_NAME"
 
 # Match host /dev/input group (evdev nodes are typically root:input mode 660).
 # Kit/carb gamepad reads event* devices, not world-readable js* nodes.
+# Match host /dev/ttyACM* group (serial ports are typically root:dialout mode 660).
 EXTRA_GROUPS="sudo,isaac-sim"
 if [ -n "${DOCKER_RUN_INPUT_GID:-}" ]; then
     if ! getent group "${DOCKER_RUN_INPUT_GID}" >/dev/null; then
@@ -22,6 +23,13 @@ if [ -n "${DOCKER_RUN_INPUT_GID:-}" ]; then
     fi
     INPUT_GROUP_NAME="$(getent group "${DOCKER_RUN_INPUT_GID}" | cut -d: -f1)"
     EXTRA_GROUPS="${EXTRA_GROUPS},${INPUT_GROUP_NAME}"
+fi
+if [ -n "${DOCKER_RUN_DIALOUT_GID:-}" ]; then
+    if ! getent group "${DOCKER_RUN_DIALOUT_GID}" >/dev/null; then
+        groupadd --gid "${DOCKER_RUN_DIALOUT_GID}" dialout
+    fi
+    DIALOUT_GROUP_NAME="$(getent group "${DOCKER_RUN_DIALOUT_GID}" | cut -d: -f1)"
+    EXTRA_GROUPS="${EXTRA_GROUPS},${DIALOUT_GROUP_NAME}"
 fi
 
 useradd --no-log-init \

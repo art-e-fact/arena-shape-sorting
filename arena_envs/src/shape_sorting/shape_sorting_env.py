@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -25,6 +24,9 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
 
     enable_cameras: bool = False
     embodiment: str = "droid_rel_joint_pos"
+    teleop_device: str | None = None
+    leader_port: str = "/dev/ttyACM0"
+    leader_id: str = "leader"
     hdr: str | None = None
     light_intensity: float = 500.0
     additional_table_objects: list[str] = field(default_factory=list)
@@ -59,8 +61,12 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from shape_sorting.pick_and_place_task import PickAndPlaceTaskRL
         from shape_sorting.shape_asset import make_shape_sorting_layout
 
-        # SO-101 embodiments live in the arena_so101 package (so101_arena/ project).
-        if cfg.embodiment.startswith("so101"):
+        # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
+        if (
+            cfg.embodiment.startswith("so101")
+            or (cfg.teleop_device or "").startswith("so101")
+            or cfg.teleop_device == "gamepad"
+        ):
             import arena_so101
 
             if not hasattr(arena_so101, "register"):
@@ -117,6 +123,13 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         # Droid does not wire concatenate_observation_terms into its obs cfg yet.
         embodiment.observation_config.policy.concatenate_terms = True
 
+        teleop_device = None
+        if cfg.teleop_device is not None:
+            teleop_device = self.device_registry.get_device_by_name(cfg.teleop_device)()
+            if cfg.teleop_device == "so101_leader":
+                teleop_device.port = cfg.leader_port
+                teleop_device.leader_id = cfg.leader_id
+
         # Step 5: Compose the scene.
         scene = Scene(
             assets=[
@@ -150,15 +163,10 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             embodiment=embodiment,
             scene=scene,
             task=task,
+            teleop_device=teleop_device,
             env_cfg_callback=_set_viewer_cfg,
             rl_framework_entry_point="rsl_rl_cfg_entry_point",
             rl_policy_cfg=f"{base_rsl_rl_policy.__name__}:RLPolicyCfg",
         )
         return isaaclab_arena_environment
 
-    # TODO(cvolk, 2026-07-03): [typed-config-migration] Delete this CLI-only option when teleoperation runners
-    # receive typed configuration instead of the environment subparser namespace.
-    @staticmethod
-    def _add_legacy_cli_only_args(parser: argparse.ArgumentParser) -> None:
-        # Consumed directly by teleop.py and record_demos.py, not by build(cfg).
-        parser.add_argument("--teleop_device", type=str, default=None)

@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-leader = ["lerobot"]
+leader = ["lerobot[feetech]"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

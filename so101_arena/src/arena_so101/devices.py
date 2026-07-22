@@ -4,8 +4,8 @@ Arena's built-in device library has keyboard / spacemouse / openxr but not
 gamepad. We register ``gamepad`` here so ``@register_retargeter`` pairs with
 ``so101_ik`` resolve through ArenaEnvBuilder.
 
-The physical SO-101 leader outputs joint positions via LeRobot, so use
-``python -m arena_so101.teleop_leader`` for that control loop.
+``so101_leader`` returns an Isaac Lab ``DeviceCfg`` that emits absolute joint
+targets for ``so101_abs_joint`` (not SE3).
 """
 
 from __future__ import annotations
@@ -16,6 +16,8 @@ from isaaclab.devices import Se3GamepadCfg
 
 from isaaclab_arena.assets.device_library import TeleopDeviceBase
 from isaaclab_arena.assets.register import register_device
+
+from arena_so101.leader_device import SO101LeaderDeviceCfg
 
 
 @register_device
@@ -45,7 +47,7 @@ class GamepadCfg(TeleopDeviceBase):
 
 @register_device
 class SO101LeaderCfg(TeleopDeviceBase):
-    """Registered as ``so101_leader``. Drive sim with ``arena_so101.teleop_leader``."""
+    """Registered as ``so101_leader`` — absolute joints via LeRobot."""
 
     name = "so101_leader"
 
@@ -54,9 +56,11 @@ class SO101LeaderCfg(TeleopDeviceBase):
         self.port = port
         self.leader_id = leader_id
 
-    def get_device_cfg(self, pipeline_builder: Callable | None = None, embodiment: object | None = None):
-        raise RuntimeError(
-            "so101_leader is joint-space (LeRobot), not an SE3 Arena device. "
-            "Use: python -m arena_so101.teleop_leader --port ... "
-            f"(port={self.port!r}, id={self.leader_id!r})"
+    def get_device_cfg(
+        self, pipeline_builder: Callable | None = None, embodiment: object | None = None
+    ) -> SO101LeaderDeviceCfg:
+        return SO101LeaderDeviceCfg(
+            port=self.port,
+            leader_id=self.leader_id,
+            sim_device=self.sim_device or "cpu",
         )
