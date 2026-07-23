@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
 from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
@@ -40,6 +41,7 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER
 
 
+@register_environment
 class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg]):
     """Registered provider for the procedural shape-sorting environment."""
 
