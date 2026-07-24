@@ -66,10 +66,6 @@ if "openxr" in args_cli.teleop_device.lower():
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-from isaaclab_arena.utils.isaaclab_utils.isaac_rtx_renderer_patch import patch_isaac_rtx_renderer
-
-patch_isaac_rtx_renderer()
-
 import carb
 import gymnasium as gym
 import omni
