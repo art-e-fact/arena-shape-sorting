@@ -352,6 +352,8 @@ def setup_teleop(env_cfg):
         return create_isaac_teleop_device(env_cfg.isaac_teleop, sim_device=env_cfg.sim.device, callbacks=callbacks)
 
     if hasattr(env_cfg, "teleop_devices") and args_cli.teleop_device in env_cfg.teleop_devices.devices:
+        device_cfg = env_cfg.teleop_devices.devices[args_cli.teleop_device]
+        print(f"[teleop] Creating {args_cli.teleop_device!r} from {type(device_cfg).__name__}")
         return create_teleop_device(args_cli.teleop_device, env_cfg.teleop_devices.devices, callbacks)
 
     name = args_cli.teleop_device.lower()
@@ -359,7 +361,10 @@ def setup_teleop(env_cfg):
         return Se3Keyboard(Se3KeyboardCfg(pos_sensitivity=0.2, rot_sensitivity=0.5))
     if name == "spacemouse":
         return Se3SpaceMouse(Se3SpaceMouseCfg(pos_sensitivity=0.2, rot_sensitivity=0.5))
-    raise RuntimeError(f"Unsupported teleop device: {args_cli.teleop_device}")
+    raise RuntimeError(
+        f"Unsupported teleop device: {args_cli.teleop_device!r} "
+        f"(teleop_devices keys: {list(getattr(getattr(env_cfg, 'teleop_devices', None), 'devices', {}) or {})})"
+    )
 
 
 def run(env, env_cfg, success_term, rate_limiter: RateLimiter | None) -> int:

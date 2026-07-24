@@ -6,12 +6,19 @@ teleop script. That avoids the double-registration crash from combining
 
 Examples::
 
-    # SE(3) — gamepad / keyboard / spacemouse
+    # Absolute joint gamepad (recommended for SO-101)
+    python -m shape_sorting.run_teleop \\
+      --viz kit --num_envs 1 \\
+      shape_sorting_test \\
+      --embodiment so101_abs_joint \\
+      --teleop_device gamepad
+
+    # SE(3) — keyboard / spacemouse / gamepad
     python -m shape_sorting.run_teleop \\
       --viz kit --num_envs 1 \\
       shape_sorting_test \\
       --embodiment so101_ik \\
-      --teleop_device gamepad
+      --teleop_device keyboard
 
     # Physical SO-101 leader (absolute joints)
     python -m shape_sorting.run_teleop \\
