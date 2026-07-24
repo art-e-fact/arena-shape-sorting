@@ -44,6 +44,11 @@ class MeshData:
     face_vertex_counts: tuple[int, ...]
     face_vertex_indices: tuple[int, ...]
 
+    def __repr__(self) -> str:
+        n_faces = len(self.face_vertex_counts)
+        n_indices = len(self.face_vertex_indices)
+        return f"MeshData(n_vertices={len(self.vertices)}, n_faces={n_faces}, n_indices={n_indices})"
+
 
 @dataclass
 class MeshPart:
@@ -52,6 +57,9 @@ class MeshPart:
     name: str
     mesh: MeshData
     collision_approximation: str = "convexHull"
+
+    def __repr__(self) -> str:
+        return f"MeshPart(name={self.name!r}, mesh={self.mesh!r}, collision_approximation={self.collision_approximation!r})"
 
 
 def bounding_box_from_mesh_data(mesh: MeshData) -> AxisAlignedBoundingBox:

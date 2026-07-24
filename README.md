@@ -21,31 +21,47 @@ This will build the container and start an interactive shell. Until the release 
 docker/run_docker.sh
 ```
 
-## Start demonstraions
+## Start demonstrations
 
-Start recording teleoperated demonstraions with SE3 controllers. (Due to the limited degrees of freedoms the SO101 have, controlling the the end-effector target pose is not effective but good enough for testing the setup)
+Segmented recording (recommended): plan a motion without recording, then replay or
+smooth-execute it from a checkpoint. Only the execute phase is written to HDF5.
+
+Keys while running: `I` retry, `U` undo segment, `P` replay, `O` smooth, `Backspace` abort, `R` reset.
+
+SE3 keyboard / gamepad:
 ```bash
-python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/record_demos.py \
+python -m shape_sorting.run_record_demos_segmented \
   --viz kit \
   --device cpu \
   --dataset_file ./so101_shape_sorting.hdf5 \
   --num_demos 10 \
   --num_success_steps 2 \
-  --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \
   shape_sorting_test \
   --embodiment so101_ik \
   --teleop_device keyboard  # or --teleop_device gamepad
 ```
 
-Start recording teleoperated demonstraions with the SO101 leader arm.
+Joint-space gamepad (absolute joints — recommended for SO-101):
 ```bash
-python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/record_demos.py \
+python -m shape_sorting.run_record_demos_segmented \
   --viz kit \
   --device cpu \
   --dataset_file ./so101_shape_sorting.hdf5 \
   --num_demos 10 \
   --num_success_steps 2 \
-  --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \
+  shape_sorting_test \
+  --embodiment so101_abs_joint \
+  --teleop_device gamepad
+```
+
+SO-101 leader arm (absolute joints — prefer `P` replay; `O` smooth also works well here):
+```bash
+python -m shape_sorting.run_record_demos_segmented \
+  --viz kit \
+  --device cpu \
+  --dataset_file ./so101_shape_sorting.hdf5 \
+  --num_demos 10 \
+  --num_success_steps 2 \
   shape_sorting_test \
   --embodiment so101_abs_joint \
   --teleop_device so101_leader \
@@ -54,3 +70,4 @@ python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/recor
 
 Notes:
  - Pass `--forms cube cylinder triangle hexagon star cross` to change the shapes used
+ - Optional `--smooth_steps N` controls how many steps `O` interpolates (default 30)

@@ -40,6 +40,11 @@ _USD_LIMITS_DEG = (
     (-10.0, 100.0),  # gripper / Jaw
 )
 
+# Same limits in radians (for absolute teleop clamping).
+JOINT_LIMITS_RAD = tuple(
+    (math.radians(lo), math.radians(hi)) for lo, hi in _USD_LIMITS_DEG
+)
+
 
 def leader_dict_to_sim_radians(
     leader_action: dict[str, float],

@@ -16,8 +16,8 @@ from isaaclab.utils import configclass
 class SO101LeaderDevice(DeviceBase):
     """Read LeRobot SO-101 leader joints and emit a (6,) absolute joint action.
 
-    Matches ``so101_abs_joint``. Keyboard ``R`` callbacks are supported for Arena
-    teleop / record_demos (leader motion itself is not keyboard-driven).
+    Matches ``so101_abs_joint``. Keyboard callbacks registered via ``add_callback``
+    are forwarded (stock record_demos uses ``R`` / ``RESET``).
     """
 
     def __init__(self, cfg: SO101LeaderDeviceCfg):
@@ -88,11 +88,11 @@ class SO101LeaderDevice(DeviceBase):
     def _on_keyboard_event(self, event, *args, **kwargs) -> bool:
         if event.type != carb.input.KeyboardEventType.KEY_PRESS:
             return True
-        if event.input.name == "R":
-            if "R" in self._additional_callbacks:
-                self._additional_callbacks["R"]()
-            if "RESET" in self._additional_callbacks:
-                self._additional_callbacks["RESET"]()
+        # Forward any registered key (R/RESET used by stock record_demos; others optional).
+        if event.input.name in self._additional_callbacks:
+            self._additional_callbacks[event.input.name]()
+        if event.input.name == "R" and "RESET" in self._additional_callbacks:
+            self._additional_callbacks["RESET"]()
         return True
 
 

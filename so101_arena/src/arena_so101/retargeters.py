@@ -27,6 +27,15 @@ class SO101LeaderRelJointRetargeter(RetargetterBase):
 
 
 @register_retargeter
+class SO101AbsJointGamepadRetargeter(RetargetterBase):
+    device = "gamepad"
+    embodiment = "so101_abs_joint"
+
+    def get_pipeline_builder(self, embodiment: object) -> Callable | None:
+        return None
+
+
+@register_retargeter
 class SO101IKKeyboardRetargeter(RetargetterBase):
     device = "keyboard"
     embodiment = "so101_ik"
