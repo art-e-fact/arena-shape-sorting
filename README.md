@@ -41,6 +41,19 @@ python -m shape_sorting.run_record_demos_segmented \
   --teleop_device keyboard  # or --teleop_device gamepad
 ```
 
+Joint-space gamepad (absolute joints — recommended for SO-101):
+```bash
+python -m shape_sorting.run_record_demos_segmented \
+  --viz kit \
+  --device cpu \
+  --dataset_file ./so101_shape_sorting.hdf5 \
+  --num_demos 10 \
+  --num_success_steps 2 \
+  shape_sorting_test \
+  --embodiment so101_abs_joint \
+  --teleop_device gamepad
+```
+
 SO-101 leader arm (absolute joints — prefer `P` replay; `O` smooth also works well here):
 ```bash
 python -m shape_sorting.run_record_demos_segmented \
