@@ -33,6 +33,7 @@ from isaaclab.utils.math import quat_from_euler_xyz
 from isaaclab_arena.assets.register import register_asset
 from isaaclab_arena.embodiments.common.arm_mode import ArmMode
 from isaaclab_arena.embodiments.embodiment_base import EmbodimentBase
+from isaaclab_arena.utils.cameras import ArenaCameraCfg
 from isaaclab_arena.utils.pose import Pose
 
 from arena_so101.mapping import SIM_JOINT_NAMES
@@ -217,7 +218,7 @@ class SO101ObservationsCfg:
 
 
 @configclass
-class SO101CameraCfg:
+class SO101CameraCfg(ArenaCameraCfg):
     # Workshop ego cam: spawn at gripper mount, offset into the real lens frame.
     camera_ego: TiledCameraCfg = TiledCameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/gripper/gripper_cam",

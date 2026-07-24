@@ -14,12 +14,27 @@ or, if already cloned, init the submodules:
 git submodule update --init --recursive
 ```
 
-## Build Docker 
+## Install
 
-This will build the container and start an interactive shell. Until the release IsaacLab-Arena on pypi, Docker is the recommended way to install it.
+### With Docker 
+
+This will build the container and start an interactive shell.
 ```bash
 docker/run_docker.sh
 ```
+
+### With Python venv
+
+Requires [uv](https://docs.astral.sh/uv/) and a machine that can run Isaac Sim / Isaac Lab.
+Source once per shell session (creates/syncs Arena's venv on first use, then activates it):
+
+```bash
+source ./setup.sh
+# optional: source ./setup.sh --force   # re-run uv sync
+# optional: source ./setup.sh --wheel   # Isaac Lab from wheel instead of source
+```
+
+> TODO: We can switch to simple `uv run ...` once IsaacLab-Arena will be released as a Python package 
 
 ## Start demonstrations
 
