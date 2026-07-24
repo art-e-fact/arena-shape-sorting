@@ -28,7 +28,7 @@ embodiment = asset_registry.get_asset_by_name("so101_abs_joint")(enable_cameras=
 
 | Name | Actions |
 |------|---------|
-| `so101_abs_joint` | Absolute joint positions (best for leader teleop) |
+| `so101_abs_joint` | Absolute joint positions (leader + joint-space gamepad) |
 | `so101_rel_joint` | Relative joint positions |
 | `so101_ik` | Relative SE(3) differential IK + binary Jaw (keyboard / gamepad / spacemouse) |
 
@@ -40,10 +40,15 @@ Wrist camera is a Python `TiledCameraCfg` on `Robot/gripper/gripper_cam` (enable
 
 ## Teleop
 
-Same Arena teleop path for SE(3) devices and the physical leader:
-
 ```bash
-# SE(3)
+# Joint-space gamepad (absolute joints — recommended for SO-101 demos)
+python -m shape_sorting.run_teleop \
+  --viz kit --num_envs 1 \
+  shape_sorting_test \
+  --embodiment so101_abs_joint \
+  --teleop_device gamepad
+
+# SE(3) task-space (gamepad / keyboard / spacemouse)
 python -m shape_sorting.run_teleop \
   --viz kit --num_envs 1 \
   shape_sorting_test \
@@ -59,6 +64,20 @@ python -m shape_sorting.run_teleop \
   --leader_port /dev/ttyACM0
 ```
 
-`so101_leader` is a normal Arena/Isaac Lab device: `advance()` returns a (6,) absolute
-joint vector for `so101_abs_joint`. Also works with Arena's `record_demos.py` when the
-env wires `--teleop_device so101_leader`.
+### Joint-space gamepad layout (`so101_abs_joint` + `gamepad`)
+
+Sticks/triggers integrate into a held absolute joint target. Releasing sticks holds pose.
+
+| Input | Joint |
+|-------|-------|
+| RT (+) / LT (−) | `Rotation` (base yaw) |
+| Left stick up/down | `Pitch` |
+| Left stick left/right | `Elbow` |
+| Right stick up/down | `Wrist_Pitch` |
+| Right stick right/left | `Wrist_Roll` |
+| X | `Jaw` toggle open / close (absolute limits) |
+
+Speed is `delta_scale` on `GamepadCfg` (default `0.03` rad/step at full deflection).
+
+`so101_leader` emits a (6,) absolute joint vector for `so101_abs_joint`. Also works with
+Arena's `record_demos.py` when the env wires `--teleop_device so101_leader`.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+import torch
 import isaaclab.envs.mdp as mdp_isaac_lab
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -27,6 +28,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.math import quat_from_euler_xyz
 
 from isaaclab_arena.assets.register import register_asset
 from isaaclab_arena.embodiments.common.arm_mode import ArmMode
@@ -51,8 +53,18 @@ _ARM_JOINT_NAMES = (
 _JAW_OPEN_RAD = math.radians(100.0)
 _JAW_CLOSE_RAD = math.radians(-10.0)
 
+def _quat_xyzw_from_euler_deg(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
+    """Intrinsic XYZ Euler (degrees) → quaternion (x, y, z, w)."""
+    quat = quat_from_euler_xyz(
+        torch.tensor(math.radians(roll)),
+        torch.tensor(math.radians(pitch)),
+        torch.tensor(math.radians(yaw)),
+    )
+    return tuple(quat.tolist())
+
+
 # 90° yaw about Z (x, y, z, w).
-_YAW_90 = (0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4))
+_YAW_90 = _quat_xyzw_from_euler_deg(0.0, 0.0, 90.0)
 
 _SO101_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
@@ -105,6 +117,8 @@ _SO101_CFG = ArticulationCfg(
 )
 
 # High-PD / gravity-off copy for differential IK (same idea as FRANKA_PANDA_HIGH_PD_CFG).
+# Diff-IK assumes joint targets are tracked tightly; gravity + soft PD would make EE
+# lag the SE(3) command. Gravity off removes that disturbance; high PD tracks targets.
 _SO101_IK_CFG = _SO101_CFG.copy()
 _SO101_IK_CFG.spawn.rigid_props.disable_gravity = True
 _SO101_IK_CFG.actuators = {
@@ -202,19 +216,6 @@ class SO101ObservationsCfg:
     policy: PolicyCfg = PolicyCfg()
 
 
-def _quat_from_euler_deg(roll: float, pitch: float, yaw: float) -> tuple[float, float, float, float]:
-    """XYZ intrinsic euler (deg) → (w, x, y, z)."""
-    r, p, y = (math.radians(a) for a in (roll, pitch, yaw))
-    cr, sr = math.cos(r / 2), math.sin(r / 2)
-    cp, sp = math.cos(p / 2), math.sin(p / 2)
-    cy, sy = math.cos(y / 2), math.sin(y / 2)
-    w = cr * cp * cy + sr * sp * sy
-    x = sr * cp * cy - cr * sp * sy
-    y_ = cr * sp * cy + sr * cp * sy
-    z = cr * cp * sy - sr * sp * cy
-    return (w, x, y_, z)
-
-
 @configclass
 class SO101CameraCfg:
     # Workshop ego cam: spawn at gripper mount, offset into the real lens frame.
@@ -232,7 +233,7 @@ class SO101CameraCfg:
         ),
         offset=TiledCameraCfg.OffsetCfg(
             pos=(-0.005, 0.06, -0.062),
-            rot=_quat_from_euler_deg(-45.0, 0.0, 0.0),
+            rot=_quat_xyzw_from_euler_deg(-45.0, 0.0, 0.0),
             convention="opengl",
         ),
     )
@@ -271,7 +272,7 @@ class SO101EmbodimentBase(EmbodimentBase):
 
 @register_asset
 class SO101AbsJointEmbodiment(SO101EmbodimentBase):
-    """Absolute joint positions — preferred for SO-101 leader teleop."""
+    """Absolute joint positions — preferred for SO-101 leader / joint gamepad teleop."""
 
     name = "so101_abs_joint"
 
