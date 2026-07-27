@@ -50,6 +50,11 @@ python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \
   shape_sorting_test \
   --forms cube cylinder hexagon star
 ```
+The viewer should show the environment with the default embodiment.
+<img width="2488" height="1378" alt="image" src="https://github.com/user-attachments/assets/5bcb7b11-80b4-4230-b7a2-7e46c8634668" />
+
+
+
 
 ### Environment options (`shape_sorting_test`)
 
@@ -76,6 +81,12 @@ These flags go after the `shape_sorting_test` subcommand (same for `record_demos
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
 
 ## Teleoperation Data Collection
+
+
+
+https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
+
+
 
 ```bash
 python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/record_demos.py \
