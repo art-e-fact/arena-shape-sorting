@@ -2,6 +2,8 @@
 
 # IsaacLab-Arena shape-sorting environment and SO-101 embodiment
 
+The repository contains a shape-sorting game environment with procedurally generated shape pieces and a sorting box and an SO-101 embodiment implementation.
+
 ## Set up workspace
 
 ### Clone repo
@@ -137,7 +139,7 @@ Features:
  - Undo parts of the demo
  - Replace teleoperated motion with a smooth transition from the start to the end position
 
-The CLI will guide you through the recording process. Optional `--smooth_steps N` controls how many steps `O` interpolates (default 30).
+The CLI will guide you through the recording process. Optional `--smooth_steps N` controls how many steps the smooth transition interpolates (default 30).
 
 ```bash
 python -m shape_sorting.run_record_demos_segmented \
@@ -151,3 +153,9 @@ python -m shape_sorting.run_record_demos_segmented \
   --embodiment so101_ik \
   --teleop_device keyboard
 ```
+
+## Next steps
+
+ - [ ] Publish training dataset
+ - [ ] Publish control policy
+ - [ ] Add evaluation tests
