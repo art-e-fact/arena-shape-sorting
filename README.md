@@ -1,8 +1,8 @@
 :construction: Work in progress...
 
-# IsaacLab Arena Shape Sorting Environment and SO-101 embodiment
+# IsaacLab-Arena shape-sorting environment and SO-101 embodiment
 
-## Setup workspace
+## Set up workspace
 
 ### Clone repo
 
@@ -40,7 +40,7 @@ The virtual environment will be located under `submodules/IsaacLab-Arena/.venv`.
 
 ## Run the environment
 
-Test the installation by evaluating the environment with zero-action policy.
+Smoke-test the installation by running the environment with a zero-action policy:
 ```bash
 python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \
   --viz kit \
@@ -59,7 +59,7 @@ The viewer should show the environment with the default embodiment.
 
 ### Environment options (`shape_sorting_test`)
 
-These flags go after the `shape_sorting_test` subcommand (same for `record_demos.py` and the segmented recorder):
+These flags go after the `shape_sorting_test` subcommand (same for `policy_runner.py`, `record_demos.py`, and the segmented recorder):
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -81,7 +81,7 @@ These flags go after the `shape_sorting_test` subcommand (same for `record_demos
 
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
 
-## Teleoperation Data Collection
+## Teleoperation data collection
 
 
 
@@ -137,7 +137,7 @@ Features:
  - Undo parts of the demo
  - Replace teleoperated motion with a smooth transition from the start to the end position
 
-The CLI will quide you through the recording process. Optional `--smooth_steps N` controls how many steps `O` interpolates (default 30).
+The CLI will guide you through the recording process. Optional `--smooth_steps N` controls how many steps `O` interpolates (default 30).
 
 ```bash
 python -m shape_sorting.run_record_demos_segmented \
@@ -151,5 +151,3 @@ python -m shape_sorting.run_record_demos_segmented \
   --embodiment so101_ik \
   --teleop_device keyboard
 ```
-
-
