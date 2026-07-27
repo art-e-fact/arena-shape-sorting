@@ -51,7 +51,8 @@ python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \
   --forms cube cylinder hexagon star
 ```
 The viewer should show the environment with the default embodiment.
-<img width="2488" height="1378" alt="image" src="https://github.com/user-attachments/assets/5bcb7b11-80b4-4230-b7a2-7e46c8634668" />
+<img width="2488" height="1378" alt="shape-sorting-env-kit-franka" src="https://github.com/user-attachments/assets/adc9c370-7958-4514-8bce-4b68b8a02dad" />
+
 
 
 
