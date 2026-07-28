@@ -39,6 +39,36 @@ Wrist camera is a Python `TiledCameraCfg` on `Robot/gripper/gripper_cam` (enable
 
 `so101_ik` is a 5-DOF arm: DLS tracks EE position and does best-effort orientation on the 6D pose command.
 
+## cuRobo planning assets
+
+Generate a URDF (from the workshop USD) plus a cuRobo robot YAML (collision spheres,
+self-collision ignore matrix, locked Jaw, home pose) under
+`embodiments/data/curobo/`:
+
+```bash
+# Inside the Isaac Sim / Arena env (needs CUDA + nvidia-curobo)
+python -m arena_so101.generate_curobo_config --headless
+```
+
+Outputs:
+
+| File | Purpose |
+|------|---------|
+| `embodiments/data/curobo/urdf/SO-ARM101-USD.urdf` | Kinematics matching sim joint names |
+| `embodiments/data/curobo/meshes/` | Link meshes referenced by the URDF |
+| `embodiments/data/curobo/so101.yml` | cuRobo `robot_cfg` for `MotionPlanner` |
+
+Rebuild spheres from an existing URDF (no Isaac Sim):
+
+```bash
+python -m arena_so101.generate_curobo_config \
+  --skip-usd-convert \
+  --urdf arena_so101/src/arena_so101/embodiments/data/curobo/urdf/SO-ARM101-USD.urdf \
+  --asset-path arena_so101/src/arena_so101/embodiments/data/curobo/meshes
+```
+
+Add `--visualize` to inspect fitted spheres in Viser.
+
 ## Teleop
 
 ```bash
