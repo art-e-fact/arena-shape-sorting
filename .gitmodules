@@ -2,3 +2,7 @@
 	path = submodules/IsaacLab-Arena
 	url = git@github.com:isaac-sim/IsaacLab-Arena.git
 	branch = main
+[submodule "submodules/curobo"]
+	path = submodules/curobo
+	url = https://github.com/NVlabs/curobo
+	branch = main
