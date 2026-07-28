@@ -76,6 +76,15 @@ class CuroboPolicyCfg(PolicyCfg):
     waypoint_stride: int = 2
     """Play every N-th interpolated waypoint (1 = all). Speeds up playback vs sim dt."""
 
+    debug_viz: bool = True
+    """Draw goal sphere + EE frame markers in the Kit viewport."""
+
+    marker_frame_scale: float = 0.08
+    """World-scale of the EE frame marker axes [m]."""
+
+    marker_sphere_radius: float = 0.015
+    """Radius of the goal sphere marker [m]."""
+
 
 @register_policy
 class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
@@ -90,6 +99,9 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._step_idx = 0
         self._hold_action: torch.Tensor | None = None
         self._sim_joint_indices: dict[str, int] | None = None
+        self._goal_marker = None
+        self._ee_marker = None
+        self._ee_body_id: int | None = None
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         # Replan on next get_action (single-env smoke test; ignore env_ids).
@@ -100,6 +112,9 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def close(self) -> None:
         self._planner = None
         self._traj = None
+        self._goal_marker = None
+        self._ee_marker = None
+        self._ee_body_id = None
 
     def get_action(self, env: gym.Env, observation: GymSpacesDict) -> torch.Tensor:
         device = torch.device(env.unwrapped.device)
@@ -126,6 +141,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             if action_1 is None:
                 action_1 = self._current_joint_action(env, device)
 
+        self._update_debug_viz(env, device)
         return action_1.unsqueeze(0).expand(num_envs, -1).contiguous()
 
     def _robot_yml_path(self) -> Path:
@@ -253,3 +269,67 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             action[sim_index[name]] = q_planner[i]
         action[sim_index["Jaw"]] = float(self.config.jaw_open)
         return action
+
+    def _tool_frame_name(self) -> str:
+        if self._planner is not None and self._planner.tool_frames:
+            return str(self._planner.tool_frames[0])
+        return "gripper"
+
+    def _ensure_markers(self, env: gym.Env) -> None:
+        if not self.config.debug_viz:
+            return
+        if self._goal_marker is not None and self._ee_marker is not None:
+            return
+
+        from isaaclab.markers import VisualizationMarkers
+        from isaaclab.markers.config import FRAME_MARKER_CFG, SPHERE_MARKER_CFG
+
+        sphere_cfg = SPHERE_MARKER_CFG.copy()
+        sphere_cfg.prim_path = "/Visuals/CuroboPolicy/goal"
+        sphere_cfg.markers["sphere"].radius = float(self.config.marker_sphere_radius)
+        self._goal_marker = VisualizationMarkers(sphere_cfg)
+
+        frame_cfg = FRAME_MARKER_CFG.copy()
+        frame_cfg.prim_path = "/Visuals/CuroboPolicy/ee_frame"
+        scale = float(self.config.marker_frame_scale)
+        frame_cfg.markers["frame"].scale = (scale, scale, scale)
+        self._ee_marker = VisualizationMarkers(frame_cfg)
+
+        robot = env.unwrapped.scene["robot"]
+        tool = self._tool_frame_name()
+        body_ids, body_names = robot.find_bodies(tool)
+        if not body_ids:
+            raise RuntimeError(
+                f"CuroboPolicy debug viz: robot has no body matching tool frame '{tool}'. "
+                f"Have: {list(robot.body_names)}"
+            )
+        self._ee_body_id = int(body_ids[0])
+        print(f"[CuroboPolicy] Debug markers ready (goal sphere + EE frame '{body_names[0]}').")
+
+    def _update_debug_viz(self, env: gym.Env, device: torch.device) -> None:
+        if not self.config.debug_viz:
+            return
+
+        import warp as wp
+        from isaaclab.utils.math import combine_frame_transforms
+
+        self._ensure_markers(env)
+        assert self._goal_marker is not None and self._ee_marker is not None
+        assert self._ee_body_id is not None
+
+        robot = env.unwrapped.scene["robot"]
+        num_envs = env.unwrapped.num_envs
+
+        root_pose_w = wp.to_torch(robot.data.root_pose_w).to(device=device, dtype=torch.float32)
+        goal_pos_b = torch.tensor(
+            [[self.config.goal_x, self.config.goal_y, self.config.goal_z]],
+            device=device,
+            dtype=torch.float32,
+        ).expand(num_envs, -1)
+        goal_pos_w, _ = combine_frame_transforms(root_pose_w[:, 0:3], root_pose_w[:, 3:7], goal_pos_b)
+        self._goal_marker.visualize(translations=goal_pos_w)
+
+        ee_pose_w = wp.to_torch(robot.data.body_link_pose_w)[:, self._ee_body_id, :].to(
+            device=device, dtype=torch.float32
+        )
+        self._ee_marker.visualize(translations=ee_pose_w[:, 0:3], orientations=ee_pose_w[:, 3:7])
