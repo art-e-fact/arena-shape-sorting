@@ -1,7 +1,9 @@
 """Minimal cuRobo reach policy for SO-101 smoke tests.
 
-Plans once to a fixed end-effector position (robot base frame), then plays back
-absolute joint waypoints. Requires ``--embodiment so101_abs_joint``.
+Plans once to a fixed end-effector position, then plays back absolute joint
+waypoints. Goal ``(x, y, z)`` is in the robot base / URDF frame by default, or
+in a scene object's frame when ``--goal_object`` is set. Requires
+``--embodiment so101_abs_joint``.
 
 Example::
 
@@ -12,6 +14,10 @@ Example::
       --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \\
       shape_sorting_test \\
       --embodiment so101_abs_joint
+
+Reach 5 cm above a piece (object frame)::
+
+    ... --goal_object shape_piece_cube --goal_x 0 --goal_y 0 --goal_z 0.05
 """
 
 from __future__ import annotations
@@ -50,13 +56,16 @@ class CuroboPolicyCfg(PolicyCfg):
     """Path to cuRobo ``so101.yml``. Empty uses the generated package default."""
 
     goal_x: float = 0.18
-    """Goal EE x in the robot base / URDF frame [m]."""
+    """Goal EE x [m]. Robot base frame, or ``goal_object`` frame if set."""
 
     goal_y: float = 0.0
-    """Goal EE y in the robot base / URDF frame [m]."""
+    """Goal EE y [m]. Robot base frame, or ``goal_object`` frame if set."""
 
     goal_z: float = 0.12
-    """Goal EE z in the robot base / URDF frame [m]."""
+    """Goal EE z [m]. Robot base frame, or ``goal_object`` frame if set."""
+
+    goal_object: str = ""
+    """Scene entity name whose frame interprets the goal. Empty = robot base."""
 
     position_tolerance: float = 0.015
     """cuRobo position convergence tolerance [m]."""
@@ -189,11 +198,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         # policy_runner wraps get_action in torch.inference_mode(); cuRobo IK needs autograd.
         with torch.inference_mode(False):
             q_start = self._current_planner_joint_state(env, device)
-            goal_pos = torch.tensor(
-                [[[[[self.config.goal_x, self.config.goal_y, self.config.goal_z]]]]],
-                device=device,
-                dtype=torch.float32,
-            )
+            goal_xyz = self._goal_position_in_robot_base(env, device)
+            goal_pos = goal_xyz.view(1, 1, 1, 1, 3)
             # wxyz identity — orientation is effectively free via large tolerance.
             goal_quat = torch.tensor(
                 [[[[[1.0, 0.0, 0.0, 0.0]]]]], device=device, dtype=torch.float32
@@ -206,8 +212,15 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
             print(
                 f"[CuroboPolicy] Planning to EE "
-                f"({self.config.goal_x:.3f}, {self.config.goal_y:.3f}, {self.config.goal_z:.3f}) "
-                f"in robot base frame…"
+                f"({goal_xyz[0]:.3f}, {goal_xyz[1]:.3f}, {goal_xyz[2]:.3f}) "
+                f"in robot base frame"
+                + (
+                    f" (from '{self.config.goal_object}' local "
+                    f"({self.config.goal_x:.3f}, {self.config.goal_y:.3f}, {self.config.goal_z:.3f}))"
+                    if self.config.goal_object
+                    else ""
+                )
+                + "…"
             )
             result = self._planner.plan_pose(goal, q_start)
             if result is None or not bool(result.success.any()):
@@ -229,6 +242,65 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             self._step_idx = 0
             self._hold_action = self._planner_q_to_action(self._traj[-1], device).detach()
             print(f"[CuroboPolicy] Plan OK — {self._traj.shape[0]} waypoints (stride={stride}).")
+
+    def _goal_offset(self, device: torch.device) -> torch.Tensor:
+        """Configured goal offset as a (3,) tensor."""
+        return torch.tensor(
+            [self.config.goal_x, self.config.goal_y, self.config.goal_z],
+            device=device,
+            dtype=torch.float32,
+        )
+
+    def _scene_entity(self, env: gym.Env, name: str):
+        scene = env.unwrapped.scene
+        try:
+            return scene[name]
+        except KeyError as exc:
+            available = sorted(scene.keys()) if hasattr(scene, "keys") else []
+            raise KeyError(
+                f"CuroboPolicy goal_object '{name}' not in scene. Available: {available}"
+            ) from exc
+
+    def _goal_position_in_robot_base(self, env: gym.Env, device: torch.device) -> torch.Tensor:
+        """Resolve configured goal into the robot base / URDF frame. Shape (3,)."""
+        import warp as wp
+        from isaaclab.utils.math import combine_frame_transforms, subtract_frame_transforms
+
+        offset = self._goal_offset(device)
+        if not self.config.goal_object:
+            return offset
+
+        robot = env.unwrapped.scene["robot"]
+        obj = self._scene_entity(env, self.config.goal_object)
+        robot_pose_w = wp.to_torch(robot.data.root_pose_w)[0].to(device=device, dtype=torch.float32)
+        obj_pose_w = wp.to_torch(obj.data.root_pose_w)[0].to(device=device, dtype=torch.float32)
+
+        goal_w, _ = combine_frame_transforms(
+            obj_pose_w[0:3].unsqueeze(0),
+            obj_pose_w[3:7].unsqueeze(0),
+            offset.unsqueeze(0),
+        )
+        goal_b, _ = subtract_frame_transforms(
+            robot_pose_w[0:3].unsqueeze(0),
+            robot_pose_w[3:7].unsqueeze(0),
+            goal_w,
+        )
+        return goal_b[0]
+
+    def _goal_position_w(self, env: gym.Env, device: torch.device, num_envs: int) -> torch.Tensor:
+        """World-frame goal positions for debug markers. Shape (num_envs, 3)."""
+        import warp as wp
+        from isaaclab.utils.math import combine_frame_transforms
+
+        offset = self._goal_offset(device).unsqueeze(0).expand(num_envs, -1)
+        if self.config.goal_object:
+            obj = self._scene_entity(env, self.config.goal_object)
+            pose_w = wp.to_torch(obj.data.root_pose_w).to(device=device, dtype=torch.float32)
+        else:
+            robot = env.unwrapped.scene["robot"]
+            pose_w = wp.to_torch(robot.data.root_pose_w).to(device=device, dtype=torch.float32)
+        goal_w, _ = combine_frame_transforms(pose_w[:, 0:3], pose_w[:, 3:7], offset)
+        return goal_w
 
     def _sim_name_to_index(self, env: gym.Env) -> dict[str, int]:
         if self._sim_joint_indices is not None:
@@ -311,7 +383,6 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             return
 
         import warp as wp
-        from isaaclab.utils.math import combine_frame_transforms
 
         self._ensure_markers(env)
         assert self._goal_marker is not None and self._ee_marker is not None
@@ -320,13 +391,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         robot = env.unwrapped.scene["robot"]
         num_envs = env.unwrapped.num_envs
 
-        root_pose_w = wp.to_torch(robot.data.root_pose_w).to(device=device, dtype=torch.float32)
-        goal_pos_b = torch.tensor(
-            [[self.config.goal_x, self.config.goal_y, self.config.goal_z]],
-            device=device,
-            dtype=torch.float32,
-        ).expand(num_envs, -1)
-        goal_pos_w, _ = combine_frame_transforms(root_pose_w[:, 0:3], root_pose_w[:, 3:7], goal_pos_b)
+        goal_pos_w = self._goal_position_w(env, device, num_envs)
         self._goal_marker.visualize(translations=goal_pos_w)
 
         ee_pose_w = wp.to_torch(robot.data.body_link_pose_w)[:, self._ee_body_id, :].to(
