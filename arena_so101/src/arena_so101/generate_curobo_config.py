@@ -175,12 +175,16 @@ def build_curobo_yaml(
         tool_frames=[tool_frame],
     )
 
-    clip_links = {base_link: ("z", 0.0)}
+    # Base is fixed to the world; the arm cannot collide with it, so skip spheres.
+    if base_link in builder._mesh_link_names:
+        builder._mesh_link_names = [n for n in builder._mesh_link_names if n != base_link]
+        print(f"Skipping collision spheres for fixed base link: {base_link}")
+
     print("\nFitting collision spheres...")
     builder.fit_collision_spheres(
         sphere_density=sphere_density,
         compute_metrics=compute_metrics,
-        clip_links=clip_links,
+        protrusion_weight=2000.0,
     )
     print(f"Fitted {builder.num_spheres} spheres across {len(builder.collision_link_names)} links")
 
@@ -386,7 +390,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sphere-density",
         type=float,
-        default=1.0,
+        default=2.0,
         help="cuRobo sphere-density multiplier (default: 1.0).",
     )
     parser.add_argument(
