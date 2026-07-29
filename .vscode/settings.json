@@ -1,6 +1,7 @@
 {
     "python.analysis.extraPaths": [
         "${workspaceFolder}",
+        "${workspaceFolder}/submodules/curobo",
         "${workspaceFolder}/submodules/IsaacLab-Arena",
         "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab/",
         "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_assets/",
@@ -18,6 +19,7 @@
     ],
     "cursorpyright.analysis.extraPaths": [
         "${workspaceFolder}",
+        "${workspaceFolder}/submodules/curobo",
         "${workspaceFolder}/submodules/IsaacLab-Arena",
         "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab/",
         "${workspaceFolder}/submodules/IsaacLab-Arena/submodules/IsaacLab/source/isaaclab_assets/",
