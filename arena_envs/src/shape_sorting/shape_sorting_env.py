@@ -1,4 +1,3 @@
-
 # Copyright (c) 2025-2026, The Isaac Lab Arena Project Developers (https://github.com/isaac-sim/IsaacLab-Arena/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
@@ -38,6 +37,8 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     clearance: float = 0.003
     edge_chamfer: float = DEFAULT_EDGE_CHAMFER
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER
+    debug_key_reset: bool = False
+    """If True, press R (Isaac window focused) to end the current episode early."""
 
 
 class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg]):
@@ -49,6 +50,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
     def build(self, cfg: ShapeSortingEnvironmentCfg) -> IsaacLabArenaEnvironment:
         """Build the environment from its typed configuration."""
         from isaaclab.envs.common import ViewerCfg
+        from isaaclab.managers import TerminationTermCfg
 
         from isaaclab_arena.assets.object_base import ObjectType
         from isaaclab_arena.assets.object_reference import ObjectReference
@@ -58,6 +60,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.tasks.sorting_task import SortMultiObjectTask
         from isaaclab_arena.utils.pose import Pose
 
+        from shape_sorting.debug_key_reset import debug_key_reset_termination
         from shape_sorting.shape_asset import make_shape_sorting_layout
 
         # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
@@ -98,12 +101,14 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         )
         table_reference.add_relation(IsAnchor())
 
+        # +X points in front of the robot on the table.
+        # +Y points to the left of the robot on the table.
         layout.box.add_relation(On(table_reference))
-        layout.box.add_relation(PositionLimits(x_min=0.5, x_max=0.55, y_min=-0.101, y_max=-0.05))
+        layout.box.add_relation(PositionLimits(x_min=0.4, x_max=0.41, y_min=-0.101, y_max=-0.1))
 
         for asset in layout.pieces:
             asset.add_relation(On(table_reference))
-            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.52, y_min=0.01, y_max=0.28))
+            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.5, y_min=-0.11, y_max=0.2))
 
         additional_table_objects = [
             self.asset_registry.get_asset_by_name(name)() for name in cfg.additional_table_objects
@@ -168,6 +173,12 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         # Set viewport camera to match the robolab droid view.
         def _set_viewer_cfg(env_cfg):
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
+            if cfg.debug_key_reset:
+                # Truncation (not success): ends the episode so policy_runner resets and continues.
+                env_cfg.terminations.debug_key_reset = TerminationTermCfg(
+                    func=debug_key_reset_termination,
+                    time_out=True,
+                )
             return env_cfg
 
         # Assemble the environment.
@@ -180,4 +191,3 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             env_cfg_callback=_set_viewer_cfg,
         )
         return isaaclab_arena_environment
-
