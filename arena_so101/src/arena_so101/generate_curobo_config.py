@@ -2,7 +2,9 @@
 
 Converts ``embodiments/data/SO-ARM101-USD.usd`` to URDF (Isaac Lab), then runs
 cuRobo ``RobotBuilder`` to fit collision spheres and write a planning config.
-The YAML is patched for this repo's joint names, home pose, and locked Jaw.
+Authored spheres in ``curobo_sphere_colliders.usda`` (Sphere prims named
+``*curobo_collider_sphere*``) replace the auto-fit for those links. The YAML is
+patched for this repo's joint names, home pose, and locked Jaw.
 
 Requires Isaac Sim (USD→URDF) and cuRobo v0.8+ (sphere fitting). CUDA is
 needed for the build step.
@@ -20,6 +22,9 @@ Examples::
 
     # Inspect fitted spheres in Viser
     python -m arena_so101.generate_curobo_config --headless --visualize
+
+    # Skip authored USDA spheres under embodiments/data/curobo_sphere_colliders.usda
+    python -m arena_so101.generate_curobo_config --headless --no-sphere-colliders
 """
 
 from __future__ import annotations
@@ -37,7 +42,13 @@ from typing import Any
 
 _PKG_DIR = Path(__file__).resolve().parent
 _DEFAULT_USD = _PKG_DIR / "embodiments" / "data" / "SO-ARM101-USD.usd"
+_DEFAULT_SPHERE_COLLIDERS = (
+    _PKG_DIR / "embodiments" / "data" / "curobo_sphere_colliders.usda"
+)
 _DEFAULT_OUTPUT_DIR = _PKG_DIR / "embodiments" / "data" / "curobo"
+
+# Prim-name substring marking authored cuRobo collision spheres in the USDA.
+_CUROBO_SPHERE_MARKER = "curobo_collider_sphere"
 
 # Must match ArticulationCfg init_state in embodiments/so101.py.
 _HOME_JOINT_POS: dict[str, float] = {
@@ -141,6 +152,83 @@ def convert_usd_to_urdf(usd_path: Path, output_dir: Path) -> tuple[Path, Path]:
     return urdf_path, mesh_dir
 
 
+def load_authored_collision_spheres(
+    usda_path: Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Load link→sphere lists from a USDA with ``curobo_collider_sphere*`` prims.
+
+    Sphere prims are expected under their parent link (e.g. ``over "jaw"`` /
+    ``over "gripper"``). Each sphere uses ``radius`` and ``xformOp:translate``
+    (link-local center). Returns cuRobo-style dicts::
+
+        {"center": [x, y, z], "radius": r}
+
+    Reads the USDA layer via ``pxr`` (usd-core / Isaac Sim) without composing the
+    referenced robot USD, so only this file's authored spheres are used.
+    """
+    if not usda_path.is_file():
+        raise FileNotFoundError(f"Sphere-collider USDA not found: {usda_path}")
+
+    try:
+        from pxr import Sdf
+    except ImportError as exc:
+        raise ImportError(
+            "Reading authored collision spheres requires pxr (usd-core or Isaac Sim)."
+        ) from exc
+
+    layer = Sdf.Layer.FindOrOpen(str(usda_path.resolve()))
+    if layer is None:
+        raise RuntimeError(f"Failed to open USDA layer: {usda_path}")
+
+    by_link: dict[str, list[dict[str, Any]]] = {}
+
+    def _walk(spec: Any) -> None:
+        if spec.typeName == "Sphere" and _CUROBO_SPHERE_MARKER in spec.name:
+            parent_path = spec.path.GetParentPath()
+            link_name = parent_path.name
+            if not link_name:
+                raise RuntimeError(f"Sphere {spec.path} has no parent link")
+            radius_attr = spec.attributes.get("radius")
+            translate_attr = spec.attributes.get("xformOp:translate")
+            if radius_attr is None or radius_attr.default is None:
+                raise RuntimeError(f"Sphere {spec.path} is missing radius")
+            if translate_attr is None or translate_attr.default is None:
+                raise RuntimeError(f"Sphere {spec.path} is missing xformOp:translate")
+            t = translate_attr.default
+            by_link.setdefault(link_name, []).append(
+                {
+                    "center": [float(t[0]), float(t[1]), float(t[2])],
+                    "radius": float(radius_attr.default),
+                }
+            )
+            return
+        for child in spec.nameChildren.values():
+            _walk(child)
+
+    for root in layer.rootPrims.values():
+        _walk(root)
+    return by_link
+
+
+def apply_authored_collision_spheres(
+    builder: Any,
+    authored: dict[str, list[dict[str, Any]]],
+) -> list[str]:
+    """Replace fitted spheres for links present in ``authored``. Returns those links."""
+    if not authored:
+        return []
+    if builder._collision_spheres is None:
+        builder._collision_spheres = {}
+    replaced: list[str] = []
+    for link_name, spheres in authored.items():
+        builder._collision_spheres[link_name] = [
+            {"center": list(s["center"]), "radius": float(s["radius"])} for s in spheres
+        ]
+        replaced.append(link_name)
+        print(f"  {link_name}: {len(spheres)} authored sphere(s)")
+    return replaced
+
+
 def build_curobo_yaml(
     urdf_path: Path,
     asset_path: Path,
@@ -154,6 +242,7 @@ def build_curobo_yaml(
     visualize: bool = False,
     viz_port: int = 8080,
     seed: int = 42,
+    sphere_colliders_usd: Path | None = None,
 ) -> Path:
     """Fit spheres / collision matrix and write a cuRobo robot YAML."""
     import numpy as np
@@ -184,9 +273,25 @@ def build_curobo_yaml(
     builder.fit_collision_spheres(
         sphere_density=sphere_density,
         compute_metrics=compute_metrics,
-        protrusion_weight=2000.0,
+        protrusion_weight=10.0,
+        coverage_weight=1000.0,
     )
     print(f"Fitted {builder.num_spheres} spheres across {len(builder.collision_link_names)} links")
+
+    if sphere_colliders_usd is not None:
+        print(f"\nLoading authored spheres from {sphere_colliders_usd}")
+        authored = load_authored_collision_spheres(sphere_colliders_usd)
+        if not authored:
+            print(
+                f"  warning: no '{_CUROBO_SPHERE_MARKER}*' Sphere prims found",
+                file=sys.stderr,
+            )
+        else:
+            replaced = apply_authored_collision_spheres(builder, authored)
+            print(
+                f"Replaced auto-fit spheres on {len(replaced)} link(s); "
+                f"total spheres now {builder.num_spheres}"
+            )
 
     if compute_metrics and builder.link_metrics:
         print(f"  {'link':<25s} {'n_sph':>5s} {'cover%':>7s} {'protr%':>7s}")
@@ -390,7 +495,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--sphere-density",
         type=float,
-        default=2.0,
+        default=1.0,
         help="cuRobo sphere-density multiplier (default: 1.0).",
     )
     parser.add_argument(
@@ -426,6 +531,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Override EE / tool link name (default: auto-detect gripper).",
+    )
+    parser.add_argument(
+        "--sphere-colliders",
+        type=Path,
+        default=_DEFAULT_SPHERE_COLLIDERS,
+        help=(
+            "USDA with authored Sphere prims named *curobo_collider_sphere* "
+            f"(default: {_DEFAULT_SPHERE_COLLIDERS}). Those links replace auto-fit spheres."
+        ),
+    )
+    parser.add_argument(
+        "--no-sphere-colliders",
+        action="store_true",
+        help="Ignore authored sphere USDA; keep only auto-fitted spheres.",
     )
     return parser
 
@@ -519,6 +638,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         output_yml = output_dir / args.yaml_name
+        sphere_colliders = None
+        if not args.no_sphere_colliders:
+            sphere_colliders = args.sphere_colliders
+            if sphere_colliders is not None and not sphere_colliders.is_file():
+                print(
+                    f"Sphere-collider USDA not found ({sphere_colliders}); "
+                    "continuing with auto-fit only.",
+                    file=sys.stderr,
+                )
+                sphere_colliders = None
+
         build_curobo_yaml(
             urdf_path,
             mesh_dir,
@@ -531,6 +661,7 @@ def main(argv: list[str] | None = None) -> int:
             visualize=args.visualize,
             viz_port=args.viz_port,
             seed=args.seed,
+            sphere_colliders_usd=sphere_colliders,
         )
         print("\nDone. Point MotionPlanner / CuroboEmbodimentCfg at:")
         print(f"  robot YAML: {output_yml}")

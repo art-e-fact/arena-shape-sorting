@@ -20,5 +20,6 @@ where = ["src"]
 [tool.setuptools.package-data]
 arena_so101 = [
     "embodiments/data/*.usd",
+    "embodiments/data/*.usda",
     "embodiments/data/curobo/**/*",
 ]
