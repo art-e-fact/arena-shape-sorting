@@ -160,8 +160,8 @@ class CuroboPolicyCfg(PolicyCfg):
     place_object: str = "sorting_box"
     """Unused; place XY/Z come from ``hole_frames`` matching the current shape."""
 
-    place_z_offset_m: float = 0.14
-    """EE height above the matched lid hole in the robot base frame [m]."""
+    place_z_offset_m: float = 0.02
+    """Object-origin height above the matched lid hole in the robot base frame [m]."""
 
     position_tolerance: float = 0.015
     """cuRobo position convergence tolerance [m]."""
@@ -231,6 +231,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._ee_body_id: int | None = None
         self._shape_idx = 0
         self._shapes: list[ShapeInfo] | None = None
+        # Object origin in the cuRobo tool / EE frame at ATTACH. Shape (3,).
+        self._grasp_offset_ee: torch.Tensor | None = None
 
     # ------------------------------------------------------------------
     # PolicyBase
@@ -245,6 +247,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = None
         self._active_goal_b = None
         self._active_goal_quat_xyzw = None
+        self._grasp_offset_ee = None
         self._shape_idx = 0
         self._shapes = None
 
@@ -258,6 +261,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._ee_marker = None
         self._ee_body_id = None
         self._shapes = None
+        self._grasp_offset_ee = None
 
     def get_action(self, env: gym.Env, observation: GymSpacesDict) -> torch.Tensor:
         device = torch.device(env.unwrapped.device)
@@ -384,11 +388,39 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             am._disabled_num_envs = 1
             print(f"[CuroboPolicy] ATTACH fitted {spheres_ee.shape[0]} spheres on attached_object.")
 
+        self._snapshot_grasp_offset(env, device, ee_pose=ee)
+
+    def _snapshot_grasp_offset(
+        self,
+        env: gym.Env,
+        device: torch.device,
+        *,
+        ee_pose=None,
+    ) -> None:
+        """Store object origin in the cuRobo tool frame (translation only)."""
+        assert self._planner is not None
+        if ee_pose is None:
+            q = self._current_planner_joint_state(env, device)
+            ee_pose = self._planner.compute_kinematics(q).tool_poses.get_link_pose(
+                self._planner.tool_frames[0]
+            )
+
+        obj_b = self._entity_position_in_robot_base(env, device, self._current_shape(env).name)
+        offset = ee_pose.inverse().transform_points(obj_b.view(1, 3).contiguous())
+        self._grasp_offset_ee = offset.reshape(3).detach().clone()
+        print(
+            f"[CuroboPolicy] grasp offset (EE frame)=("
+            f"{float(self._grasp_offset_ee[0]):.4f}, "
+            f"{float(self._grasp_offset_ee[1]):.4f}, "
+            f"{float(self._grasp_offset_ee[2]):.4f})"
+        )
+
     def _detach_attached_object(self) -> None:
         """Clear ``attached_object`` spheres and re-enable any disabled world obstacles.
 
         No-op when nothing is attached. Safe to call before free-space planning.
         """
+        self._grasp_offset_ee = None
         if self._planner is None:
             return
         am = self._planner.attachment_manager
@@ -409,7 +441,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         return [n for n in names if needle in n or n.endswith(entity_name)]
 
     # ------------------------------------------------------------------
-    # PLACE — plan above the matching lid hole, jaw closed
+    # PLACE — plan so object origin is above the lid hole, jaw closed
     # ------------------------------------------------------------------
 
     def _step_place(self, env: gym.Env, device: torch.device) -> torch.Tensor:
@@ -776,12 +808,42 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def _place_pose_in_robot_base(
         self, env: gym.Env, device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Place EE pose: above the current shape's lid hole by ``place_z_offset_m``."""
+        """Place EE pose so the grasped object origin sits above the lid hole.
+
+        Uses the ATTACH-time grasp offset (object in EE frame). Orientation is
+        still the SO-101 default from ``so101_ee_pose_xyzw`` (no yaw alignment).
+        """
+        from isaaclab.utils.math import quat_apply
+
+        if self._grasp_offset_ee is None:
+            raise RuntimeError(
+                "CuroboPolicy PLACE requires a grasp offset; ATTACH must run first."
+            )
+
         hole_b = self._hole_position_in_robot_base(env, device)
+        obj_desired = hole_b.clone()
+        obj_desired[2] = obj_desired[2] + float(self.config.place_z_offset_m)
+
+        # Seed EE orientation from the hole XY, then back out EE position so
+        # R @ grasp_offset places the object at obj_desired.
+        _, quat_seed = so101_ee_pose_xyzw(
+            float(obj_desired[0]),
+            float(obj_desired[1]),
+            float(obj_desired[2]),
+            tilt=_GOAL_TILT_RAD,
+            roll=_GOAL_ROLL_RAD,
+            device=device,
+        )
+        offset_b = quat_apply(
+            quat_seed.unsqueeze(0),
+            self._grasp_offset_ee.to(device=device, dtype=torch.float32).unsqueeze(0),
+        )[0]
+        ee_pos = obj_desired - offset_b
+
         return so101_ee_pose_xyzw(
-            float(hole_b[0]),
-            float(hole_b[1]),
-            float(hole_b[2]) + float(self.config.place_z_offset_m),
+            float(ee_pos[0]),
+            float(ee_pos[1]),
+            float(ee_pos[2]),
             tilt=_GOAL_TILT_RAD,
             roll=_GOAL_ROLL_RAD,
             device=device,
