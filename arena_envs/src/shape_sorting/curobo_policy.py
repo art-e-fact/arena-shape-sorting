@@ -1,6 +1,6 @@
 """cuRobo pick-and-place smoke-test policy for SO-101.
 
-Sequence: APPROACH → CLOSE → ATTACH → PLACE → OPEN → DONE.
+Sequence: APPROACH → CLOSE → ATTACH → PLACE → OPEN → HOME → DONE.
 Plans with ``plan_pose`` (straight to pose; no ``plan_grasp``). Collision world
 comes from the live USD stage (see ``curobo_world``). Requires
 ``--embodiment so101_abs_joint``.
@@ -62,12 +62,26 @@ _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
 _ATTACH_NUM_SPHERES = 4
 
 
+_HOME_JOINT_RAD = tuple(
+    math.radians(v)
+    for v in (
+        -1.6e-05,  # shoulder_pan / Rotation
+        4.5e-03,   # shoulder_lift / Pitch
+        5.5e-03,   # elbow_flex / Elbow
+        2.1e-03,   # wrist_flex / Wrist_Pitch
+        -4.6e-06,  # wrist_roll / Wrist_Roll
+        0.200,     # gripper / Jaw
+    )
+)
+
+
 class Phase(Enum):
     APPROACH = auto()
     CLOSE = auto()
     ATTACH = auto()
     PLACE = auto()
     OPEN = auto()
+    HOME = auto()
     DONE = auto()
 
 
@@ -164,7 +178,10 @@ class CuroboPolicyCfg(PolicyCfg):
     """Sim steps to hold the closed jaw before ATTACH."""
 
     open_steps: int = 20
-    """Sim steps to hold the open jaw before DONE."""
+    """Sim steps to hold the open jaw before HOME."""
+
+    home_steps: int = 30
+    """Sim steps to cosine-interpolate to the home joint pose."""
 
     use_cuda_graph: bool = False
     """Enable cuRobo CUDA graphs."""
@@ -190,7 +207,7 @@ class CuroboPolicyCfg(PolicyCfg):
 
 @register_policy
 class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
-    """APPROACH → CLOSE → ATTACH → PLACE → OPEN pick-and-place smoke test."""
+    """APPROACH → CLOSE → ATTACH → PLACE → OPEN → HOME pick-and-place smoke test."""
 
     name = "curobo_reach"
 
@@ -257,6 +274,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             action = self._step_place(env, device)
         elif self._phase is Phase.OPEN:
             action = self._step_open(device)
+        elif self._phase is Phase.HOME:
+            action = self._step_home(env, device)
         else:  # DONE
             action = self._hold_action
             if action is None:
@@ -383,13 +402,46 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         action = self._hold_with_jaw(device, self.config.jaw_open)
         self._phase_steps += 1
         if self._phase_steps >= max(1, int(self.config.open_steps)):
-            print("[CuroboPolicy] OPEN done → DONE.")
-            self._phase = Phase.DONE
+            print(f"[CuroboPolicy] OPEN done → HOME ({self.config.home_steps} steps).")
+            self._phase = Phase.HOME
+            self._traj = None
+            self._step_idx = 0
         return action
 
     # ------------------------------------------------------------------
-    # Shared motion helpers
+    # HOME — cosine-interpolate all joints to the recorded home pose
     # ------------------------------------------------------------------
+
+    def _step_home(self, env: gym.Env, device: torch.device) -> torch.Tensor:
+        if self._traj is None:
+            self._build_home_traj(env, device)
+
+        assert self._traj is not None
+        if self._step_idx >= self._traj.shape[0]:
+            print("[CuroboPolicy] HOME done → DONE.")
+            self._phase = Phase.DONE
+            assert self._hold_action is not None
+            return self._hold_action
+
+        action = self._traj[self._step_idx].to(device=device, dtype=torch.float32)
+        self._step_idx += 1
+        self._hold_action = action
+        return action
+
+    def _build_home_traj(self, env: gym.Env, device: torch.device) -> None:
+        """Cosine ease-in/out from current joints to home (all 6 DoF)."""
+        if self._hold_action is not None:
+            start = self._hold_action.detach().to(device=device, dtype=torch.float32)
+        else:
+            start = self._current_joint_action(env, device)
+
+        goal = torch.tensor(_HOME_JOINT_RAD, device=device, dtype=torch.float32)
+        n = max(1, int(self.config.home_steps))
+        t = torch.linspace(1.0 / n, 1.0, n, device=device, dtype=torch.float32)
+        alpha = (1.0 - torch.cos(t * math.pi)) * 0.5
+        self._traj = (start.unsqueeze(0) + alpha.unsqueeze(1) * (goal - start).unsqueeze(0)).contiguous()
+        self._step_idx = 0
+        print(f"[CuroboPolicy] HOME interpolating {n} steps to home joint pose.")
 
     def _playback_traj(self, device: torch.device, *, jaw: float) -> torch.Tensor | None:
         """Advance one waypoint, or None when the trajectory is finished."""
