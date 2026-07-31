@@ -237,6 +237,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     # ------------------------------------------------------------------
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        self._detach_attached_object()
         self._phase = Phase.APPROACH
         self._traj = None
         self._step_idx = 0
@@ -296,6 +297,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
     def _step_approach(self, env: gym.Env, device: torch.device) -> torch.Tensor:
         if self._traj is None:
+            # Free-space approach must not carry a previous attached_object.
+            self._detach_attached_object()
             shape = self._current_shape(env)
             print(
                 f"[CuroboPolicy] APPROACH shape {self._shape_idx + 1}/"
@@ -381,6 +384,23 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             am._disabled_num_envs = 1
             print(f"[CuroboPolicy] ATTACH fitted {spheres_ee.shape[0]} spheres on attached_object.")
 
+    def _detach_attached_object(self) -> None:
+        """Clear ``attached_object`` spheres and re-enable any disabled world obstacles.
+
+        No-op when nothing is attached. Safe to call before free-space planning.
+        """
+        if self._planner is None:
+            return
+        am = self._planner.attachment_manager
+        if am._attached_link_name is None and not am._disabled_obstacle_names:
+            return
+        with torch.inference_mode(False):
+            print(
+                f"[CuroboPolicy] DETACH link={am._attached_link_name} "
+                f"re-enable={list(am._disabled_obstacle_names)}"
+            )
+            am.detach()
+
     def _obstacle_names_matching(self, entity_name: str) -> list[str]:
         """USD obstacle names whose prim path contains ``/{entity_name}``."""
         assert self._planner is not None
@@ -411,6 +431,10 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     # ------------------------------------------------------------------
 
     def _step_open(self, env: gym.Env, device: torch.device) -> torch.Tensor:
+        # Release: drop attached collision spheres as soon as the jaw opens.
+        if self._phase_steps == 0:
+            self._detach_attached_object()
+
         action = self._hold_with_jaw(device, self.config.jaw_open)
         self._phase_steps += 1
         if self._phase_steps < max(1, int(self.config.open_steps)):
