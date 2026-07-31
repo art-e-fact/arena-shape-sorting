@@ -163,6 +163,8 @@ class SortingBox(Object):
     name = "sorting_box"
     tags = ["object", "procedural", "shape_sorting", "destination"]
     PART_NAMES: tuple[str, ...] = ("bottom", "front", "back", "left", "right", "lid")
+    HOLE_FRAMES_SENSOR_NAME: str = "hole_frames"
+    """Default InteractiveScene key for :meth:`get_hole_frames_cfg`."""
 
     def __init__(
         self,
@@ -225,6 +227,52 @@ class SortingBox(Object):
         if part_name not in self.PART_NAMES:
             raise ValueError(f"Unknown sorting-box part '{part_name}'. Expected one of {self.PART_NAMES}.")
         return f"{self.prim_path}/geometry/{part_name}"
+
+    @property
+    def lid_top_z(self) -> float:
+        """Local Z of the lid top surface (insertion plane) in the box frame [m]."""
+        return 0.5 * self.box_height
+
+    @staticmethod
+    def hole_frame_name(form: ShapeForm) -> str:
+        """Scene frame name for the lid hole matching ``form``."""
+        return f"hole_{form.value}"
+
+    def get_hole_frames_cfg(
+        self,
+        *,
+        debug_vis: bool = True,
+        marker_scale: float = 0.02,
+    ):
+        """FrameTransformer tracking each lid hole as an offset on the box rigid body.
+
+        Target frame names are :meth:`hole_frame_name` for each entry in
+        :attr:`forms` (same order as :attr:`hole_centers`). Source and every
+        target prim path are the box root — holes are not separate rigid bodies.
+        """
+        from isaaclab.markers.config import FRAME_MARKER_CFG
+        from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg, OffsetCfg
+
+        z = self.lid_top_z
+        target_frames = [
+            FrameTransformerCfg.FrameCfg(
+                prim_path=self.prim_path,
+                name=self.hole_frame_name(form),
+                offset=OffsetCfg(pos=(float(hx), float(hy), float(z))),
+            )
+            for (hx, hy), form in zip(self.hole_centers, self.forms)
+        ]
+        cfg = FrameTransformerCfg(
+            prim_path=self.prim_path,
+            debug_vis=debug_vis,
+            target_frames=target_frames,
+        )
+        if debug_vis:
+            marker_cfg = FRAME_MARKER_CFG.copy()
+            marker_cfg.prim_path = f"/Visuals/FrameTransformer/{self.name}_holes"
+            marker_cfg.markers["frame"].scale = (marker_scale, marker_scale, marker_scale)
+            cfg.visualizer_cfg = marker_cfg
+        return cfg
 
     def _generate_rigid_cfg(self) -> RigidObjectCfg:
         cfg = RigidObjectCfg(

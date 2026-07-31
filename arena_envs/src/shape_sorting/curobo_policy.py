@@ -1,6 +1,7 @@
 """cuRobo pick-and-place smoke-test policy for SO-101.
 
-Sequence: APPROACH → CLOSE → ATTACH → PLACE → OPEN → HOME → DONE.
+Sequence per shape: APPROACH → CLOSE → ATTACH → PLACE → OPEN, then the next
+shape from ``env.unwrapped.cfg.shapes``. After the last shape: HOME → DONE.
 Plans with ``plan_pose`` (straight to pose; no ``plan_grasp``). Collision world
 comes from the live USD stage (see ``curobo_world``). Requires
 ``--embodiment so101_abs_joint``.
@@ -10,11 +11,10 @@ Example::
     python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \\
       --viz kit \\
       --policy_type shape_sorting.curobo_policy.CuroboPolicy \\
-      --num_steps 400 \\
+      --num_steps 1200 \\
       --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \\
       shape_sorting_test \\
-      --embodiment so101_abs_joint \\
-      --goal_object shape_piece_cube
+      --embodiment so101_abs_joint
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
 
 from arena_so101.mapping import SIM_JOINT_NAMES
 from shape_sorting.curobo_world import DEFAULT_COLLISION_CACHE, load_world_from_env, obstacle_counts
+from shape_sorting.shape_sorting_env import ShapeInfo
 
 try:
     import arena_so101 as _arena_so101
@@ -153,14 +154,14 @@ class CuroboPolicyCfg(PolicyCfg):
     robot_yml: str = ""
     """Path to cuRobo ``so101.yml``. Empty uses the generated package default."""
 
-    goal_object: str = "shape_piece_cube"
-    """Scene entity to grasp (required)."""
+    goal_object: str = ""
+    """Optional single scene entity to grasp when ``env.cfg.shapes`` is absent."""
 
     place_object: str = "sorting_box"
-    """Scene entity used as the place reference (XY from its origin)."""
+    """Unused; place XY/Z come from ``hole_frames`` matching the current shape."""
 
     place_z_offset_m: float = 0.14
-    """EE height above ``place_object`` origin in the robot base frame [m]."""
+    """EE height above the matched lid hole in the robot base frame [m]."""
 
     position_tolerance: float = 0.015
     """cuRobo position convergence tolerance [m]."""
@@ -207,7 +208,7 @@ class CuroboPolicyCfg(PolicyCfg):
 
 @register_policy
 class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
-    """APPROACH → CLOSE → ATTACH → PLACE → OPEN → HOME pick-and-place smoke test."""
+    """Pick each ``env.cfg.shapes`` piece, then HOME."""
 
     name = "curobo_reach"
 
@@ -228,6 +229,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._goal_marker = None
         self._ee_marker = None
         self._ee_body_id: int | None = None
+        self._shape_idx = 0
+        self._shapes: list[ShapeInfo] | None = None
 
     # ------------------------------------------------------------------
     # PolicyBase
@@ -241,6 +244,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = None
         self._active_goal_b = None
         self._active_goal_quat_xyzw = None
+        self._shape_idx = 0
+        self._shapes = None
 
     def close(self) -> None:
         self._planner = None
@@ -251,6 +256,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._goal_marker = None
         self._ee_marker = None
         self._ee_body_id = None
+        self._shapes = None
 
     def get_action(self, env: gym.Env, observation: GymSpacesDict) -> torch.Tensor:
         device = torch.device(env.unwrapped.device)
@@ -273,7 +279,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         elif self._phase is Phase.PLACE:
             action = self._step_place(env, device)
         elif self._phase is Phase.OPEN:
-            action = self._step_open(device)
+            action = self._step_open(env, device)
         elif self._phase is Phase.HOME:
             action = self._step_home(env, device)
         else:  # DONE
@@ -290,6 +296,11 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
     def _step_approach(self, env: gym.Env, device: torch.device) -> torch.Tensor:
         if self._traj is None:
+            shape = self._current_shape(env)
+            print(
+                f"[CuroboPolicy] APPROACH shape {self._shape_idx + 1}/"
+                f"{len(self._resolve_shapes(env))} ({shape.name})."
+            )
             goal_xyz, goal_quat = self._grasp_pose_in_robot_base(env, device)
             self._plan_to_pose(env, device, goal_xyz, goal_quat, label="APPROACH")
 
@@ -328,11 +339,12 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
     def _attach_grasped_object(self, env: gym.Env, device: torch.device) -> None:
         assert self._planner is not None
-        names = self._obstacle_names_matching(self.config.goal_object)
+        goal_object = self._current_shape(env).name
+        names = self._obstacle_names_matching(goal_object)
         if not names:
             all_names = self._planner.scene_collision_checker.get_obstacle_names(0)
             raise RuntimeError(
-                f"No cuRobo obstacles match goal_object '{self.config.goal_object}'. "
+                f"No cuRobo obstacles match goal_object '{goal_object}'. "
                 f"Have: {all_names}"
             )
 
@@ -362,7 +374,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             centers_ee = centers_ee.reshape(-1, 3)
             spheres_ee = torch.cat([centers_ee, spheres_w[:, 3:4]], dim=-1)
 
-            # am.update(spheres_ee, q, link_name="attached_object", world_objects_pose_offset=None)
+            am.update(spheres_ee, q, link_name="attached_object", world_objects_pose_offset=None)
             for name in names:
                 self._planner.scene_collision_checker.enable_obstacle(name, enable=False, env_idx=0)
             am._disabled_obstacle_names = list(names)
@@ -377,7 +389,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         return [n for n in names if needle in n or n.endswith(entity_name)]
 
     # ------------------------------------------------------------------
-    # PLACE — plan above sorting_box, jaw closed
+    # PLACE — plan above the matching lid hole, jaw closed
     # ------------------------------------------------------------------
 
     def _step_place(self, env: gym.Env, device: torch.device) -> torch.Tensor:
@@ -392,20 +404,38 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         print(f"[CuroboPolicy] PLACE done → OPEN ({self.config.open_steps} steps).")
         self._phase = Phase.OPEN
         self._phase_steps = 0
-        return self._step_open(device)
+        return self._step_open(env, device)
 
     # ------------------------------------------------------------------
     # OPEN — hold arm, open jaw
     # ------------------------------------------------------------------
 
-    def _step_open(self, device: torch.device) -> torch.Tensor:
+    def _step_open(self, env: gym.Env, device: torch.device) -> torch.Tensor:
         action = self._hold_with_jaw(device, self.config.jaw_open)
         self._phase_steps += 1
-        if self._phase_steps >= max(1, int(self.config.open_steps)):
-            print(f"[CuroboPolicy] OPEN done → HOME ({self.config.home_steps} steps).")
-            self._phase = Phase.HOME
+        if self._phase_steps < max(1, int(self.config.open_steps)):
+            return action
+
+        shapes = self._resolve_shapes(env)
+        if self._shape_idx + 1 < len(shapes):
+            self._shape_idx += 1
+            nxt = shapes[self._shape_idx]
+            print(
+                f"[CuroboPolicy] OPEN done → APPROACH "
+                f"shape {self._shape_idx + 1}/{len(shapes)} ({nxt.name})."
+            )
+            self._phase = Phase.APPROACH
             self._traj = None
             self._step_idx = 0
+            self._phase_steps = 0
+            self._active_goal_b = None
+            self._active_goal_quat_xyzw = None
+            return self._step_approach(env, device)
+
+        print(f"[CuroboPolicy] OPEN done (all {len(shapes)} shapes) → HOME ({self.config.home_steps} steps).")
+        self._phase = Phase.HOME
+        self._traj = None
+        self._step_idx = 0
         return action
 
     # ------------------------------------------------------------------
@@ -587,6 +617,29 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     # Goal poses
     # ------------------------------------------------------------------
 
+    def _resolve_shapes(self, env: gym.Env) -> list[ShapeInfo]:
+        """Shapes to pick: ``env.cfg.shapes``, else a single ``goal_object``."""
+        if self._shapes is not None:
+            return self._shapes
+
+        cfg_shapes = getattr(env.unwrapped.cfg, "shapes", None)
+        if cfg_shapes:
+            self._shapes = list(cfg_shapes)
+        elif self.config.goal_object:
+            self._shapes = [ShapeInfo(prim_path=f"{{ENV_REGEX_NS}}/{self.config.goal_object}")]
+        else:
+            raise ValueError(
+                "CuroboPolicy needs env.cfg.shapes (from ShapeSortingEnvironment) "
+                "or --goal_object <scene_entity_name>."
+            )
+        if self._shape_idx >= len(self._shapes):
+            self._shape_idx = 0
+        return self._shapes
+
+    def _current_shape(self, env: gym.Env) -> ShapeInfo:
+        shapes = self._resolve_shapes(env)
+        return shapes[self._shape_idx]
+
     def _scene_entity(self, env: gym.Env, name: str):
         scene = env.unwrapped.scene
         try:
@@ -619,14 +672,13 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self, env: gym.Env, device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Grasp EE pose: XY standoff on base→object line, fixed Z."""
-        if not self.config.goal_object:
-            raise ValueError("CuroboPolicy requires --goal_object <scene_entity_name>.")
-        obj_b = self._entity_position_in_robot_base(env, device, self.config.goal_object)
+        shape = self._current_shape(env)
+        obj_b = self._entity_position_in_robot_base(env, device, shape.name)
         xy = obj_b[0:2]
         rho = torch.linalg.norm(xy)
         if float(rho) < 1e-6:
             raise RuntimeError(
-                f"CuroboPolicy: goal_object '{self.config.goal_object}' is directly above "
+                f"CuroboPolicy: shape '{shape.name}' is directly above "
                 "the robot base; cannot define a horizontal approach line."
             )
         xy_goal = xy * (1.0 - _GOAL_XY_STANDOFF_M / rho)
@@ -639,15 +691,73 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             device=device,
         )
 
+    def _hole_frame_name_for_shape(self, shape: ShapeInfo) -> str:
+        """Map ``shape_piece_<form>`` to the lid hole frame ``hole_<form>``."""
+        from shape_sorting.shape_asset import SortingBox
+        from shape_sorting.shape_forms import ShapeForm
+
+        prefix = "shape_piece_"
+        if not shape.name.startswith(prefix):
+            raise RuntimeError(
+                f"CuroboPolicy: cannot map shape '{shape.name}' to a lid hole; "
+                f"expected a name starting with '{prefix}'."
+            )
+        form_value = shape.name[len(prefix) :]
+        try:
+            form = ShapeForm(form_value)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"CuroboPolicy: unknown form '{form_value}' in shape '{shape.name}'."
+            ) from exc
+        return SortingBox.hole_frame_name(form)
+
+    def _hole_position_in_robot_base(
+        self, env: gym.Env, device: torch.device
+    ) -> torch.Tensor:
+        """Matched lid-hole origin in the robot base frame. Shape (3,)."""
+        import warp as wp
+        from isaaclab.utils.math import subtract_frame_transforms
+
+        from shape_sorting.shape_asset import SortingBox
+
+        shape = self._current_shape(env)
+        frame_name = self._hole_frame_name_for_shape(shape)
+        holes = self._scene_entity(env, SortingBox.HOLE_FRAMES_SENSOR_NAME)
+        names = list(holes.data.target_frame_names)
+        try:
+            idx = names.index(frame_name)
+        except ValueError as exc:
+            raise KeyError(
+                f"CuroboPolicy: hole frame '{frame_name}' for shape '{shape.name}' "
+                f"not in '{SortingBox.HOLE_FRAMES_SENSOR_NAME}'. Have: {names}"
+            ) from exc
+
+        robot = env.unwrapped.scene["robot"]
+        robot_pose_w = wp.to_torch(robot.data.root_pose_w)[0].to(device=device, dtype=torch.float32)
+        hole_pos_w = wp.to_torch(holes.data.target_pos_w)[0, idx].to(
+            device=device, dtype=torch.float32
+        )
+        hole_quat_w = wp.to_torch(holes.data.target_quat_w)[0, idx].to(
+            device=device, dtype=torch.float32
+        )
+
+        hole_b, _ = subtract_frame_transforms(
+            robot_pose_w[0:3].unsqueeze(0),
+            robot_pose_w[3:7].unsqueeze(0),
+            hole_pos_w.unsqueeze(0),
+            hole_quat_w.unsqueeze(0),
+        )
+        return hole_b[0]
+
     def _place_pose_in_robot_base(
         self, env: gym.Env, device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Place EE pose: directly above ``place_object`` by ``place_z_offset_m``."""
-        box_b = self._entity_position_in_robot_base(env, device, self.config.place_object)
+        """Place EE pose: above the current shape's lid hole by ``place_z_offset_m``."""
+        hole_b = self._hole_position_in_robot_base(env, device)
         return so101_ee_pose_xyzw(
-            float(box_b[0]),
-            float(box_b[1]),
-            float(box_b[2]) + float(self.config.place_z_offset_m),
+            float(hole_b[0]),
+            float(hole_b[1]),
+            float(hole_b[2]) + float(self.config.place_z_offset_m),
             tilt=_GOAL_TILT_RAD,
             roll=_GOAL_ROLL_RAD,
             device=device,

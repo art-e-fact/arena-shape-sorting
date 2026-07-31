@@ -16,6 +16,23 @@ if TYPE_CHECKING:
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
 
 
+@dataclass(frozen=True)
+class ShapeInfo:
+    """Privileged per-piece metadata attached to the manager env cfg.
+
+    Consumed by policies that need layout knowledge beyond the ``policy`` obs
+    group (e.g. cuRobo). Safe for other policies to ignore.
+    """
+
+    prim_path: str
+    """USD prim path expression (may include ``{ENV_REGEX_NS}``)."""
+
+    @property
+    def name(self) -> str:
+        """Scene entity name — last segment of :attr:`prim_path`."""
+        return self.prim_path.rstrip("/").rsplit("/", 1)[-1]
+
+
 @dataclass
 class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     """Configure the shape-sorting pick-and-place environment."""
@@ -61,7 +78,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.utils.pose import Pose
 
         from shape_sorting.debug_key_reset import debug_key_reset_termination
-        from shape_sorting.shape_asset import make_shape_sorting_layout
+        from shape_sorting.shape_asset import SortingBox, make_shape_sorting_layout
 
         # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
         if (
@@ -170,9 +187,26 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         )
         task.termination_cfg.success.params["force_threshold"] = 0.1
 
-        # Set viewport camera to match the robolab droid view.
-        def _set_viewer_cfg(env_cfg):
+        # Privileged lid-hole frames (box-local offsets) for policies / debug viz.
+        from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg
+
+        from isaaclab_arena.utils.configclass import combine_configclass_instances, make_configclass
+
+        hole_frames_cfg = box.get_hole_frames_cfg(debug_vis=True)
+        HoleFramesSceneCfg = make_configclass(
+            "HoleFramesSceneCfg",
+            [(SortingBox.HOLE_FRAMES_SENSOR_NAME, FrameTransformerCfg, hole_frames_cfg)],
+        )
+        task.scene_config = combine_configclass_instances(
+            "SceneCfg",
+            task.scene_config,
+            HoleFramesSceneCfg(),
+        )
+
+        # Privileged layout metadata + viewer / debug hooks for the manager env cfg.
+        def _configure_env_cfg(env_cfg):
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
+            env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in pieces]
             if cfg.debug_key_reset:
                 # Truncation (not success): ends the episode so policy_runner resets and continues.
                 env_cfg.terminations.debug_key_reset = TerminationTermCfg(
@@ -188,6 +222,6 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             scene=scene,
             task=task,
             teleop_device=teleop_device,
-            env_cfg_callback=_set_viewer_cfg,
+            env_cfg_callback=_configure_env_cfg,
         )
         return isaaclab_arena_environment
