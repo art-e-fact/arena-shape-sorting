@@ -43,6 +43,7 @@ class ShapeForm(Enum):
     CUBE = "cube"
     CYLINDER = "cylinder"
     TRIANGLE = "triangle"
+    PENTAGON = "pentagon"
     HEXAGON = "hexagon"
     STAR = "star"
     CROSS = "cross"
@@ -55,6 +56,7 @@ _YAW_SYMMETRY_ORDER: dict[ShapeForm, int | None] = {
     ShapeForm.CUBE: 4,
     ShapeForm.CYLINDER: None,
     ShapeForm.TRIANGLE: 3,
+    ShapeForm.PENTAGON: 5,
     ShapeForm.HEXAGON: 6,
     ShapeForm.STAR: 5,
     ShapeForm.CROSS: 4,
@@ -160,6 +162,8 @@ def add_form_profile(form: ShapeForm, size: float) -> None:
         Circle(half)
     elif form is ShapeForm.TRIANGLE:
         RegularPolygon(half, 3)
+    elif form is ShapeForm.PENTAGON:
+        RegularPolygon(half, 5)
     elif form is ShapeForm.HEXAGON:
         RegularPolygon(half, 6)
     elif form is ShapeForm.STAR:

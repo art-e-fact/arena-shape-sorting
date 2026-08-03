@@ -192,7 +192,8 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
         from isaaclab_arena.utils.configclass import combine_configclass_instances, make_configclass
 
-        hole_frames_cfg = box.get_hole_frames_cfg(debug_vis=True)
+        # TODO: debug_vis should be a parameter in the environment cfg.
+        hole_frames_cfg = box.get_hole_frames_cfg(debug_vis=False)
         HoleFramesSceneCfg = make_configclass(
             "HoleFramesSceneCfg",
             [(SortingBox.HOLE_FRAMES_SENSOR_NAME, FrameTransformerCfg, hole_frames_cfg)],
