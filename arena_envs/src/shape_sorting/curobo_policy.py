@@ -2,9 +2,8 @@
 
 Sequence per shape: APPROACH → CLOSE → ATTACH → PLACE → OPEN, then the next
 shape from ``env.unwrapped.cfg.shapes``. After the last shape: HOME → DONE.
-Plans with ``plan_pose`` (straight to pose; no ``plan_grasp``). Collision world
-comes from the live USD stage (see ``curobo_world``). Requires
-``--embodiment so101_abs_joint``.
+Plans via ``MotionClient`` (see ``curobo_motion``); collision world sync lives
+there too. Requires ``--embodiment so101_abs_joint``.
 
 Example::
 
@@ -22,31 +21,18 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum, auto
-from pathlib import Path
 
 import gymnasium as gym
 import torch
 from gymnasium.spaces.dict import Dict as GymSpacesDict
 
+from arena_so101.mapping import SIM_JOINT_NAMES
 from isaaclab_arena.assets.register import register_policy
 from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
-
-from arena_so101.mapping import SIM_JOINT_NAMES
-from shape_sorting.curobo_world import DEFAULT_COLLISION_CACHE, load_world_from_env, obstacle_counts
+from shape_sorting.curobo_motion import MotionClient, MotionClientCfg, resolve_robot_yml
+from shape_sorting.curobo_viz import KitFrameMarkers, NullCollisionDebugViz, ViserCollisionDebugViz
+from shape_sorting.curobo_world import entity_position_in_robot_base
 from shape_sorting.shape_sorting_env import ShapeInfo
-
-try:
-    import arena_so101 as _arena_so101
-
-    _DEFAULT_ROBOT_YML = (
-        Path(_arena_so101.__file__).resolve().parent
-        / "embodiments"
-        / "data"
-        / "curobo"
-        / "so101.yml"
-    )
-except Exception:
-    _DEFAULT_ROBOT_YML = Path()
 
 # Grasp pose relative to goal_object (robot base frame).
 _GOAL_XY_STANDOFF_M = 0.03
@@ -58,10 +44,6 @@ _GOAL_ROLL_RAD = 0.0
 _JAW_OPEN_RAD = math.radians(100.0)
 _JAW_CLOSE_RAD = math.radians(-10.0)
 _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
-
-# so101.yml extra_collision_spheres.attached_object
-_ATTACH_NUM_SPHERES = 4
-
 
 _HOME_JOINT_RAD = tuple(
     math.radians(v)
@@ -84,24 +66,6 @@ class Phase(Enum):
     OPEN = auto()
     HOME = auto()
     DONE = auto()
-
-
-def _format_plan_failure(result) -> str:
-    """Human-readable plan failure summary from a TrajOpt / MotionPlanner result."""
-    if result is None:
-        return "IK found no seeds (result=None); holding current joint pose."
-
-    parts = [f"success={result.success.tolist()}"]
-    if result.feasible is not None:
-        parts.append(f"feasible={result.feasible.tolist()}")
-    if result.position_error is not None:
-        parts.append(f"pos_err={result.position_error.detach().flatten().tolist()}")
-    if result.rotation_error is not None:
-        parts.append(f"rot_err={result.rotation_error.detach().flatten().tolist()}")
-    if result.metrics is not None and getattr(result.metrics, "constraint", None) is not None:
-        parts.append(f"constraint={result.metrics.constraint.detach().flatten().tolist()}")
-    parts.append("holding current joint pose.")
-    return "; ".join(parts)
 
 
 def so101_ee_pose_xyzw(
@@ -178,6 +142,9 @@ class CuroboPolicyCfg(PolicyCfg):
     close_steps: int = 20
     """Sim steps to hold the closed jaw before ATTACH."""
 
+    jaw_empty_tol: float = math.radians(5.0)
+    """If measured jaw is within this of ``jaw_closed`` after CLOSE, treat grasp as empty."""
+
     open_steps: int = 20
     """Sim steps to hold the open jaw before HOME."""
 
@@ -214,54 +181,41 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
     def __init__(self, config: CuroboPolicyCfg):
         super().__init__(config)
-        self._planner = None
+        self._motion: MotionClient | None = None
+        self._kit_markers: KitFrameMarkers | None = None
         self._phase = Phase.APPROACH
         self._traj: torch.Tensor | None = None
         self._step_idx = 0
         self._phase_steps = 0
         self._hold_action: torch.Tensor | None = None
-        self._active_goal_b: torch.Tensor | None = None  # (3,) robot base
-        self._active_goal_quat_xyzw: torch.Tensor | None = None
-        self._sim_joint_indices: dict[str, int] | None = None
-        self._world_loaded = False
-        self._collision_scene = None
-        self._viser = None
-        self._goal_marker = None
-        self._ee_marker = None
-        self._ee_body_id: int | None = None
         self._shape_idx = 0
         self._shapes: list[ShapeInfo] | None = None
-        # Object origin in the cuRobo tool / EE frame at ATTACH. Shape (3,).
-        self._grasp_offset_ee: torch.Tensor | None = None
 
     # ------------------------------------------------------------------
     # PolicyBase
     # ------------------------------------------------------------------
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        self._detach_attached_object()
+        if self._motion is not None:
+            self._motion.detach()
+            self._motion.clear_last_goal()
         self._phase = Phase.APPROACH
         self._traj = None
         self._step_idx = 0
         self._phase_steps = 0
         self._hold_action = None
-        self._active_goal_b = None
-        self._active_goal_quat_xyzw = None
-        self._grasp_offset_ee = None
         self._shape_idx = 0
         self._shapes = None
 
     def close(self) -> None:
-        self._planner = None
+        if self._motion is not None:
+            self._motion.close()
+            self._motion = None
+        if self._kit_markers is not None:
+            self._kit_markers.close()
+            self._kit_markers = None
         self._traj = None
-        self._world_loaded = False
-        self._collision_scene = None
-        self._viser = None
-        self._goal_marker = None
-        self._ee_marker = None
-        self._ee_body_id = None
         self._shapes = None
-        self._grasp_offset_ee = None
 
     def get_action(self, env: gym.Env, observation: GymSpacesDict) -> torch.Tensor:
         device = torch.device(env.unwrapped.device)
@@ -273,199 +227,116 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 f"got action dim {action_dim}. Pass `--embodiment so101_abs_joint`."
             )
 
-        self._ensure_planner(device)
+        motion = self._ensure_motion(device)
 
         if self._phase is Phase.APPROACH:
-            action = self._step_approach(env, device)
+            action = self._step_approach(env, device, motion)
         elif self._phase is Phase.CLOSE:
-            action = self._step_close(device)
+            action = self._step_close(env, device, motion)
         elif self._phase is Phase.ATTACH:
-            action = self._step_attach(env, device)
+            action = self._step_attach(env, device, motion)
         elif self._phase is Phase.PLACE:
-            action = self._step_place(env, device)
+            action = self._step_place(env, device, motion)
         elif self._phase is Phase.OPEN:
-            action = self._step_open(env, device)
+            action = self._step_open(env, device, motion)
         elif self._phase is Phase.HOME:
-            action = self._step_home(env, device)
+            action = self._step_home(env, device, motion)
         else:  # DONE
             action = self._hold_action
             if action is None:
-                action = self._current_joint_action(env, device)
+                action = motion.joint_action(env, device)
 
-        self._update_debug_viz(env, device)
+        self._update_kit_markers(env, device, motion)
         return action.unsqueeze(0).expand(num_envs, -1).contiguous()
 
     # ------------------------------------------------------------------
-    # APPROACH — plan to grasp pose, jaw open
+    # Phase steps
     # ------------------------------------------------------------------
 
-    def _step_approach(self, env: gym.Env, device: torch.device) -> torch.Tensor:
+    def _step_approach(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
         if self._traj is None:
-            # Free-space approach must not carry a previous attached_object.
-            self._detach_attached_object()
+            motion.detach()  # free-space approach must not carry a previous attach
             shape = self._current_shape(env)
             print(
                 f"[CuroboPolicy] APPROACH shape {self._shape_idx + 1}/"
                 f"{len(self._resolve_shapes(env))} ({shape.name})."
             )
             goal_xyz, goal_quat = self._grasp_pose_in_robot_base(env, device)
-            self._plan_to_pose(env, device, goal_xyz, goal_quat, label="APPROACH")
+            plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="APPROACH")
+            self._traj = plan.waypoints
+            self._hold_action = plan.hold_action
+            self._step_idx = 0
 
-        action = self._playback_traj(device, jaw=self.config.jaw_open)
+        action = self._playback_traj(device, motion, jaw=self.config.jaw_open)
         if action is not None:
             return action
 
         print(f"[CuroboPolicy] APPROACH done → CLOSE ({self.config.close_steps} steps).")
         self._phase = Phase.CLOSE
         self._phase_steps = 0
-        return self._step_close(device)
+        return self._step_close(env, device, motion)
 
-    # ------------------------------------------------------------------
-    # CLOSE — hold arm, close jaw
-    # ------------------------------------------------------------------
-
-    def _step_close(self, device: torch.device) -> torch.Tensor:
+    def _step_close(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
         action = self._hold_with_jaw(device, self.config.jaw_closed)
         self._phase_steps += 1
-        if self._phase_steps >= max(1, int(self.config.close_steps)):
-            print("[CuroboPolicy] CLOSE done → ATTACH.")
-            self._phase = Phase.ATTACH
+        if self._phase_steps < max(1, int(self.config.close_steps)):
+            return action
+
+        jaw = motion.measured_jaw(env, device)
+        if self._jaw_is_fully_closed(jaw):
+            print(
+                f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
+                f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp → APPROACH."
+            )
+            self._phase = Phase.APPROACH
+            self._traj = None
+            self._step_idx = 0
+            self._phase_steps = 0
+            motion.clear_last_goal()
+            return self._step_approach(env, device, motion)
+
+        print(f"[CuroboPolicy] CLOSE done (jaw={float(jaw):.3f}) → ATTACH.")
+        self._phase = Phase.ATTACH
         return action
 
-    # ------------------------------------------------------------------
-    # ATTACH — object spheres on robot, disable world copy (instant)
-    # ------------------------------------------------------------------
-
-    def _step_attach(self, env: gym.Env, device: torch.device) -> torch.Tensor:
-        self._attach_grasped_object(env, device)
+    def _step_attach(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        motion.attach(env, device, self._current_shape(env).name)
         print("[CuroboPolicy] ATTACH done → PLACE.")
         self._phase = Phase.PLACE
         self._traj = None
         self._step_idx = 0
-        return self._step_place(env, device)
+        return self._step_place(env, device, motion)
 
-    def _attach_grasped_object(self, env: gym.Env, device: torch.device) -> None:
-        assert self._planner is not None
-        goal_object = self._current_shape(env).name
-        names = self._obstacle_names_matching(goal_object)
-        if not names:
-            all_names = self._planner.scene_collision_checker.get_obstacle_names(0)
-            raise RuntimeError(
-                f"No cuRobo obstacles match goal_object '{goal_object}'. "
-                f"Have: {all_names}"
-            )
-
-        scene_model = self._planner.scene_collision_checker.scene_model
-        if isinstance(scene_model, list):
-            scene_model = scene_model[0]
-        obstacles = []
-        for name in names:
-            obs = scene_model.get_obstacle(name)
-            if obs is None:
-                raise RuntimeError(f"Obstacle '{name}' missing from scene_model.")
-            obstacles.append(obs)
-
-        # Work around AttachmentManager.update bug: transform_points(...).squeeze(0)
-        # collapses to 1D when only one sphere is fitted. Fit in world (robot base),
-        # map spheres into the EE frame ourselves, then update with no pose offset.
-        print(f"[CuroboPolicy] ATTACH obstacles={names}")
-        with torch.inference_mode(False):
-            am = self._planner.attachment_manager
-            q = self._current_planner_joint_state(env, device)
-            spheres_w = am.fit_spheres(obstacles, num_spheres=_ATTACH_NUM_SPHERES)
-
-            ee = self._planner.compute_kinematics(q).tool_poses.get_link_pose(
-                self._planner.tool_frames[0]
-            )
-            centers_ee = ee.inverse().transform_points(spheres_w[:, :3].contiguous())
-            centers_ee = centers_ee.reshape(-1, 3)
-            spheres_ee = torch.cat([centers_ee, spheres_w[:, 3:4]], dim=-1)
-
-            am.update(spheres_ee, q, link_name="attached_object", world_objects_pose_offset=None)
-            for name in names:
-                self._planner.scene_collision_checker.enable_obstacle(name, enable=False, env_idx=0)
-            am._disabled_obstacle_names = list(names)
-            am._disabled_num_envs = 1
-            print(f"[CuroboPolicy] ATTACH fitted {spheres_ee.shape[0]} spheres on attached_object.")
-
-        self._snapshot_grasp_offset(env, device, ee_pose=ee)
-
-    def _snapshot_grasp_offset(
-        self,
-        env: gym.Env,
-        device: torch.device,
-        *,
-        ee_pose=None,
-    ) -> None:
-        """Store object origin in the cuRobo tool frame (translation only)."""
-        assert self._planner is not None
-        if ee_pose is None:
-            q = self._current_planner_joint_state(env, device)
-            ee_pose = self._planner.compute_kinematics(q).tool_poses.get_link_pose(
-                self._planner.tool_frames[0]
-            )
-
-        obj_b = self._entity_position_in_robot_base(env, device, self._current_shape(env).name)
-        offset = ee_pose.inverse().transform_points(obj_b.view(1, 3).contiguous())
-        self._grasp_offset_ee = offset.reshape(3).detach().clone()
-        print(
-            f"[CuroboPolicy] grasp offset (EE frame)=("
-            f"{float(self._grasp_offset_ee[0]):.4f}, "
-            f"{float(self._grasp_offset_ee[1]):.4f}, "
-            f"{float(self._grasp_offset_ee[2]):.4f})"
-        )
-
-    def _detach_attached_object(self) -> None:
-        """Clear ``attached_object`` spheres and re-enable any disabled world obstacles.
-
-        No-op when nothing is attached. Safe to call before free-space planning.
-        """
-        self._grasp_offset_ee = None
-        if self._planner is None:
-            return
-        am = self._planner.attachment_manager
-        if am._attached_link_name is None and not am._disabled_obstacle_names:
-            return
-        with torch.inference_mode(False):
-            print(
-                f"[CuroboPolicy] DETACH link={am._attached_link_name} "
-                f"re-enable={list(am._disabled_obstacle_names)}"
-            )
-            am.detach()
-
-    def _obstacle_names_matching(self, entity_name: str) -> list[str]:
-        """USD obstacle names whose prim path contains ``/{entity_name}``."""
-        assert self._planner is not None
-        names = self._planner.scene_collision_checker.get_obstacle_names(0)
-        needle = f"/{entity_name}"
-        return [n for n in names if needle in n or n.endswith(entity_name)]
-
-    # ------------------------------------------------------------------
-    # PLACE — plan so object origin is above the lid hole, jaw closed
-    # ------------------------------------------------------------------
-
-    def _step_place(self, env: gym.Env, device: torch.device) -> torch.Tensor:
+    def _step_place(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
         if self._traj is None:
-            goal_xyz, goal_quat = self._place_pose_in_robot_base(env, device)
-            self._plan_to_pose(env, device, goal_xyz, goal_quat, label="PLACE")
+            goal_xyz, goal_quat = self._place_pose_in_robot_base(env, device, motion)
+            plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="PLACE")
+            self._traj = plan.waypoints
+            self._hold_action = plan.hold_action
+            self._step_idx = 0
 
-        action = self._playback_traj(device, jaw=self.config.jaw_closed)
+        action = self._playback_traj(device, motion, jaw=self.config.jaw_closed)
         if action is not None:
             return action
 
         print(f"[CuroboPolicy] PLACE done → OPEN ({self.config.open_steps} steps).")
         self._phase = Phase.OPEN
         self._phase_steps = 0
-        return self._step_open(env, device)
+        return self._step_open(env, device, motion)
 
-    # ------------------------------------------------------------------
-    # OPEN — hold arm, open jaw
-    # ------------------------------------------------------------------
-
-    def _step_open(self, env: gym.Env, device: torch.device) -> torch.Tensor:
-        # Release: drop attached collision spheres as soon as the jaw opens.
+    def _step_open(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
         if self._phase_steps == 0:
-            self._detach_attached_object()
+            motion.detach()  # release collision spheres as soon as the jaw opens
 
         action = self._hold_with_jaw(device, self.config.jaw_open)
         self._phase_steps += 1
@@ -484,23 +355,23 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             self._traj = None
             self._step_idx = 0
             self._phase_steps = 0
-            self._active_goal_b = None
-            self._active_goal_quat_xyzw = None
-            return self._step_approach(env, device)
+            motion.clear_last_goal()
+            return self._step_approach(env, device, motion)
 
-        print(f"[CuroboPolicy] OPEN done (all {len(shapes)} shapes) → HOME ({self.config.home_steps} steps).")
+        print(
+            f"[CuroboPolicy] OPEN done (all {len(shapes)} shapes) → HOME "
+            f"({self.config.home_steps} steps)."
+        )
         self._phase = Phase.HOME
         self._traj = None
         self._step_idx = 0
         return action
 
-    # ------------------------------------------------------------------
-    # HOME — cosine-interpolate all joints to the recorded home pose
-    # ------------------------------------------------------------------
-
-    def _step_home(self, env: gym.Env, device: torch.device) -> torch.Tensor:
+    def _step_home(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
         if self._traj is None:
-            self._build_home_traj(env, device)
+            self._build_home_traj(env, device, motion)
 
         assert self._traj is not None
         if self._step_idx >= self._traj.shape[0]:
@@ -514,12 +385,18 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = action
         return action
 
-    def _build_home_traj(self, env: gym.Env, device: torch.device) -> None:
+    # ------------------------------------------------------------------
+    # Trajectory helpers
+    # ------------------------------------------------------------------
+
+    def _build_home_traj(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> None:
         """Cosine ease-in/out from current joints to home (all 6 DoF)."""
         if self._hold_action is not None:
             start = self._hold_action.detach().to(device=device, dtype=torch.float32)
         else:
-            start = self._current_joint_action(env, device)
+            start = motion.joint_action(env, device)
 
         goal = torch.tensor(_HOME_JOINT_RAD, device=device, dtype=torch.float32)
         n = max(1, int(self.config.home_steps))
@@ -529,14 +406,17 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._step_idx = 0
         print(f"[CuroboPolicy] HOME interpolating {n} steps to home joint pose.")
 
-    def _playback_traj(self, device: torch.device, *, jaw: float) -> torch.Tensor | None:
+    def _playback_traj(
+        self, device: torch.device, motion: MotionClient, *, jaw: float
+    ) -> torch.Tensor | None:
         """Advance one waypoint, or None when the trajectory is finished."""
         assert self._traj is not None
         if self._step_idx >= self._traj.shape[0]:
             return None
         q = self._traj[self._step_idx]
         self._step_idx += 1
-        action = self._planner_q_to_action(q, device, jaw=jaw)
+        motion.notify_joint(q)
+        action = motion.q_to_action(q, device, jaw=jaw)
         self._hold_action = action
         return action
 
@@ -547,134 +427,60 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = action
         return action
 
-    def _plan_to_pose(
-        self,
-        env: gym.Env,
-        device: torch.device,
-        goal_xyz: torch.Tensor,
-        goal_quat_xyzw: torch.Tensor,
-        *,
-        label: str,
-    ) -> None:
-        from curobo.types import GoalToolPose
-        from isaaclab.utils.math import convert_quat
-
-        assert self._planner is not None
-        self._active_goal_b = goal_xyz.detach()
-        self._active_goal_quat_xyzw = goal_quat_xyzw.detach()
-
-        # policy_runner wraps get_action in inference_mode(); cuRobo stores goal
-        # tensors by reference then copy_s into them — clone to normal tensors.
-        with torch.inference_mode(False):
-            self._ensure_collision_world(env)
-            goal_xyz = goal_xyz.detach().clone()
-            goal_quat_xyzw = goal_quat_xyzw.detach().clone()
-            goal_quat_wxyz = convert_quat(goal_quat_xyzw, to="wxyz").clone()
-            q_start = self._current_planner_joint_state(env, device)
-            self._maybe_open_viser(q_start, goal_xyz, goal_quat_wxyz)
-            goal = GoalToolPose(
-                tool_frames=list(self._planner.tool_frames),
-                position=goal_xyz.view(1, 1, 1, 1, 3).clone(),
-                quaternion=goal_quat_wxyz.view(1, 1, 1, 1, 4).clone(),
-            )
-
-            print(
-                f"[CuroboPolicy] {label} planning EE "
-                f"pos=({goal_xyz[0]:.3f}, {goal_xyz[1]:.3f}, {goal_xyz[2]:.3f})…"
-            )
-            result = self._planner.plan_pose(goal, q_start, max_attempts=10)
-            if result is None or not bool(result.success.any()):
-                print(f"[CuroboPolicy] {label} failed — {_format_plan_failure(result)}")
-                hold = self._current_joint_action(env, device)
-                name_to_idx = self._sim_name_to_index(env)
-                row = torch.stack([hold[name_to_idx[n]] for n in self._planner.joint_names])
-                self._traj = row.unsqueeze(0).detach()
-                self._hold_action = hold.detach()
-                self._step_idx = 0
-                return
-
-            positions = result.get_interpolated_plan().position
-            while positions.ndim > 2:
-                positions = positions[0]
-            stride = max(1, int(self.config.waypoint_stride))
-            self._traj = positions[::stride].detach().contiguous()
-            self._step_idx = 0
-            print(f"[CuroboPolicy] {label} plan OK — {self._traj.shape[0]} waypoints.")
+    def _jaw_is_fully_closed(self, jaw: float | torch.Tensor) -> bool:
+        return float(jaw) <= float(self.config.jaw_closed) + float(self.config.jaw_empty_tol)
 
     # ------------------------------------------------------------------
-    # Planner / world setup
+    # Motion client + debug wiring
     # ------------------------------------------------------------------
 
-    def _robot_yml_path(self) -> Path:
-        if self.config.robot_yml:
-            path = Path(self.config.robot_yml).expanduser().resolve()
+    def _ensure_motion(self, device: torch.device) -> MotionClient:
+        if self._motion is not None:
+            return self._motion
+
+        cfg = self.config
+        if cfg.debug_viser:
+            debug = ViserCollisionDebugViz(
+                resolve_robot_yml(cfg.robot_yml),
+                port=int(cfg.debug_viser_port),
+            )
         else:
-            path = Path(_DEFAULT_ROBOT_YML).resolve()
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"cuRobo robot YAML not found: {path}. "
-                "Generate it with: python -m arena_so101.generate_curobo_config --skip-usd-convert"
-            )
-        return path
+            debug = NullCollisionDebugViz()
 
-    def _ensure_planner(self, device: torch.device) -> None:
-        if self._planner is not None:
-            return
-        from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
-        from curobo.types import DeviceCfg
-
-        if device.type != "cuda":
-            raise RuntimeError(f"cuRobo requires a CUDA device, got {device}")
-
-        yml = self._robot_yml_path()
-        print(f"[CuroboPolicy] Loading robot config: {yml}")
-        with torch.inference_mode(False):
-            cfg = MotionPlannerCfg.create(
-                robot=str(yml),
-                scene_model=None,
-                collision_cache=dict(DEFAULT_COLLISION_CACHE),
-                self_collision_check=self.config.self_collision_check,
-                use_cuda_graph=self.config.use_cuda_graph,
-                position_tolerance=self.config.position_tolerance,
-                orientation_tolerance=self.config.orientation_tolerance,
-                device_cfg=DeviceCfg(device=device, dtype=torch.float32),
-            )
-            self._planner = MotionPlanner(cfg)
-        self._world_loaded = False
-        print(
-            f"[CuroboPolicy] Planner ready. active joints={self._planner.joint_names} "
-            f"tool_frames={self._planner.tool_frames}"
+        self._motion = MotionClient(
+            MotionClientCfg(
+                robot_yml=cfg.robot_yml,
+                position_tolerance=cfg.position_tolerance,
+                orientation_tolerance=cfg.orientation_tolerance,
+                use_cuda_graph=cfg.use_cuda_graph,
+                self_collision_check=cfg.self_collision_check,
+                waypoint_stride=cfg.waypoint_stride,
+            ),
+            debug=debug,
         )
+        self._motion.ensure_ready(device)
 
-    def _ensure_collision_world(self, env: gym.Env) -> None:
-        if self._world_loaded:
+        if cfg.debug_viz:
+            self._kit_markers = KitFrameMarkers(scale=cfg.marker_frame_scale)
+
+        return self._motion
+
+    def _update_kit_markers(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> None:
+        if self._kit_markers is None:
             return
-        assert self._planner is not None
-        scene = load_world_from_env(self._planner, env, env_id=0)
-        self._collision_scene = scene if self.config.debug_viser else None
-        self._world_loaded = True
-        print(f"[CuroboPolicy] Collision world loaded: {obstacle_counts(scene)} ({len(scene)} obstacles)")
-
-    def _maybe_open_viser(self, q_start, goal_xyz, goal_quat_wxyz) -> None:
-        if not self.config.debug_viser or self._viser is not None or self._collision_scene is None:
-            return
-        from shape_sorting.curobo_viz import open_collision_world_viser
-
-        self._viser = open_collision_world_viser(
-            robot_yml=self._robot_yml_path(),
-            scene=self._collision_scene,
-            joint_state=q_start,
-            goal_position_xyz=goal_xyz.detach().cpu().tolist(),
-            goal_quaternion_wxyz=goal_quat_wxyz.detach().cpu().tolist(),
-            port=int(self.config.debug_viser_port),
+        self._kit_markers.ensure(env, motion.tool_frame)
+        goal_pos_w, goal_quat = self._goal_pose_w(env, device, motion)
+        self._kit_markers.update(
+            env, device, goal_pos_w=goal_pos_w, goal_quat_xyzw=goal_quat
         )
 
     # ------------------------------------------------------------------
-    # Goal poses
+    # Goal poses (task-level; still on the policy until PoseStrategy extract)
     # ------------------------------------------------------------------
 
     def _resolve_shapes(self, env: gym.Env) -> list[ShapeInfo]:
-        """Shapes to pick: ``env.cfg.shapes``, else a single ``goal_object``."""
         if self._shapes is not None:
             return self._shapes
 
@@ -693,43 +499,14 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         return self._shapes
 
     def _current_shape(self, env: gym.Env) -> ShapeInfo:
-        shapes = self._resolve_shapes(env)
-        return shapes[self._shape_idx]
-
-    def _scene_entity(self, env: gym.Env, name: str):
-        scene = env.unwrapped.scene
-        try:
-            return scene[name]
-        except KeyError as exc:
-            available = sorted(scene.keys()) if hasattr(scene, "keys") else []
-            raise KeyError(f"CuroboPolicy entity '{name}' not in scene. Available: {available}") from exc
-
-    def _entity_position_in_robot_base(
-        self, env: gym.Env, device: torch.device, entity_name: str
-    ) -> torch.Tensor:
-        """Entity origin in the robot base / URDF frame. Shape (3,)."""
-        import warp as wp
-        from isaaclab.utils.math import subtract_frame_transforms
-
-        robot = env.unwrapped.scene["robot"]
-        obj = self._scene_entity(env, entity_name)
-        robot_pose_w = wp.to_torch(robot.data.root_pose_w)[0].to(device=device, dtype=torch.float32)
-        obj_pose_w = wp.to_torch(obj.data.root_pose_w)[0].to(device=device, dtype=torch.float32)
-
-        obj_b, _ = subtract_frame_transforms(
-            robot_pose_w[0:3].unsqueeze(0),
-            robot_pose_w[3:7].unsqueeze(0),
-            obj_pose_w[0:3].unsqueeze(0),
-            obj_pose_w[3:7].unsqueeze(0),
-        )
-        return obj_b[0]
+        return self._resolve_shapes(env)[self._shape_idx]
 
     def _grasp_pose_in_robot_base(
         self, env: gym.Env, device: torch.device
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Grasp EE pose: XY standoff on base→object line, fixed Z."""
         shape = self._current_shape(env)
-        obj_b = self._entity_position_in_robot_base(env, device, shape.name)
+        obj_b = entity_position_in_robot_base(env, shape.name, device=device)
         xy = obj_b[0:2]
         rho = torch.linalg.norm(xy)
         if float(rho) < 1e-6:
@@ -748,7 +525,6 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         )
 
     def _hole_frame_name_for_shape(self, shape: ShapeInfo) -> str:
-        """Map ``shape_piece_<form>`` to the lid hole frame ``hole_<form>``."""
         from shape_sorting.shape_asset import SortingBox
         from shape_sorting.shape_forms import ShapeForm
 
@@ -773,22 +549,29 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         """Matched lid-hole origin in the robot base frame. Shape (3,)."""
         import warp as wp
         from isaaclab.utils.math import subtract_frame_transforms
-
         from shape_sorting.shape_asset import SortingBox
 
         shape = self._current_shape(env)
         frame_name = self._hole_frame_name_for_shape(shape)
-        holes = self._scene_entity(env, SortingBox.HOLE_FRAMES_SENSOR_NAME)
+        scene = env.unwrapped.scene
+        try:
+            holes = scene[SortingBox.HOLE_FRAMES_SENSOR_NAME]
+        except KeyError as exc:
+            available = sorted(scene.keys()) if hasattr(scene, "keys") else []
+            raise KeyError(
+                f"Hole frames sensor not in scene. Available: {available}"
+            ) from exc
+
         names = list(holes.data.target_frame_names)
         try:
             idx = names.index(frame_name)
         except ValueError as exc:
             raise KeyError(
-                f"CuroboPolicy: hole frame '{frame_name}' for shape '{shape.name}' "
+                f"Hole frame '{frame_name}' for shape '{shape.name}' "
                 f"not in '{SortingBox.HOLE_FRAMES_SENSOR_NAME}'. Have: {names}"
             ) from exc
 
-        robot = env.unwrapped.scene["robot"]
+        robot = scene["robot"]
         robot_pose_w = wp.to_torch(robot.data.root_pose_w)[0].to(device=device, dtype=torch.float32)
         hole_pos_w = wp.to_torch(holes.data.target_pos_w)[0, idx].to(
             device=device, dtype=torch.float32
@@ -806,16 +589,12 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         return hole_b[0]
 
     def _place_pose_in_robot_base(
-        self, env: gym.Env, device: torch.device
+        self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Place EE pose so the grasped object origin sits above the lid hole.
-
-        Uses the ATTACH-time grasp offset (object in EE frame). Orientation is
-        still the SO-101 default from ``so101_ee_pose_xyzw`` (no yaw alignment).
-        """
+        """Place EE so the grasped object origin sits above the lid hole."""
         from isaaclab.utils.math import quat_apply
 
-        if self._grasp_offset_ee is None:
+        if motion.grasp_offset_ee is None:
             raise RuntimeError(
                 "CuroboPolicy PLACE requires a grasp offset; ATTACH must run first."
             )
@@ -824,7 +603,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         obj_desired = hole_b.clone()
         obj_desired[2] = obj_desired[2] + float(self.config.place_z_offset_m)
 
-        # Seed EE orientation from the hole XY, then back out EE position so
+        # Seed EE orientation from hole XY, then back out EE position so
         # R @ grasp_offset places the object at obj_desired.
         _, quat_seed = so101_ee_pose_xyzw(
             float(obj_desired[0]),
@@ -836,7 +615,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         )
         offset_b = quat_apply(
             quat_seed.unsqueeze(0),
-            self._grasp_offset_ee.to(device=device, dtype=torch.float32).unsqueeze(0),
+            motion.grasp_offset_ee.to(device=device, dtype=torch.float32).unsqueeze(0),
         )[0]
         ee_pos = obj_desired - offset_b
 
@@ -850,129 +629,21 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         )
 
     def _goal_pose_w(
-        self, env: gym.Env, device: torch.device, num_envs: int
+        self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """World-frame active goal for debug markers."""
+        """World-frame active goal for Kit markers."""
         import warp as wp
         from isaaclab.utils.math import combine_frame_transforms
 
-        if self._active_goal_b is None or self._active_goal_quat_xyzw is None:
+        num_envs = env.unwrapped.num_envs
+        if motion.last_goal_xyz is None or motion.last_goal_quat_xyzw is None:
             goal_b, goal_quat_xyzw = self._grasp_pose_in_robot_base(env, device)
         else:
-            goal_b = self._active_goal_b
-            goal_quat_xyzw = self._active_goal_quat_xyzw
+            goal_b = motion.last_goal_xyz
+            goal_quat_xyzw = motion.last_goal_quat_xyzw
 
         robot = env.unwrapped.scene["robot"]
         robot_pose_w = wp.to_torch(robot.data.root_pose_w).to(device=device, dtype=torch.float32)
         t = goal_b.unsqueeze(0).expand(num_envs, -1)
         q = goal_quat_xyzw.unsqueeze(0).expand(num_envs, -1)
         return combine_frame_transforms(robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], t, q)
-
-    # ------------------------------------------------------------------
-    # Joint / action helpers
-    # ------------------------------------------------------------------
-
-    def _sim_name_to_index(self, env: gym.Env) -> dict[str, int]:
-        if self._sim_joint_indices is not None:
-            return self._sim_joint_indices
-        robot = env.unwrapped.scene["robot"]
-        names = list(robot.data.joint_names)
-        self._sim_joint_indices = {n: i for i, n in enumerate(names)}
-        missing = [n for n in SIM_JOINT_NAMES if n not in self._sim_joint_indices]
-        if missing:
-            raise RuntimeError(f"Sim robot is missing expected SO-101 joints: {missing}. Have: {names}")
-        return self._sim_joint_indices
-
-    def _current_joint_action(self, env: gym.Env, device: torch.device) -> torch.Tensor:
-        robot = env.unwrapped.scene["robot"]
-        q = robot.data.joint_pos[0].detach().to(device=device, dtype=torch.float32)
-        name_to_idx = self._sim_name_to_index(env)
-        action = torch.zeros(len(SIM_JOINT_NAMES), device=device, dtype=torch.float32)
-        for i, name in enumerate(SIM_JOINT_NAMES):
-            action[i] = q[name_to_idx[name]]
-        return action
-
-    def _current_planner_joint_state(self, env: gym.Env, device: torch.device):
-        from curobo.types import JointState
-
-        assert self._planner is not None
-        robot = env.unwrapped.scene["robot"]
-        q = robot.data.joint_pos[0].detach().to(device=device, dtype=torch.float32)
-        name_to_idx = self._sim_name_to_index(env)
-        active = [q[name_to_idx[name]] for name in self._planner.joint_names]
-        # clone: JointState may be stored in cuRobo goal buffers and mutated inplace.
-        q_active = torch.stack(active).unsqueeze(0).contiguous().clone()
-        return JointState.from_position(q_active, joint_names=list(self._planner.joint_names))
-
-    def _planner_q_to_action(
-        self, q_planner: torch.Tensor, device: torch.device, *, jaw: float
-    ) -> torch.Tensor:
-        assert self._planner is not None
-        action = torch.zeros(len(SIM_JOINT_NAMES), device=device, dtype=torch.float32)
-        sim_index = {n: i for i, n in enumerate(SIM_JOINT_NAMES)}
-        for i, name in enumerate(self._planner.joint_names):
-            action[sim_index[name]] = q_planner[i]
-        action[_JAW_INDEX] = float(jaw)
-        return action
-
-    # ------------------------------------------------------------------
-    # Debug viz
-    # ------------------------------------------------------------------
-
-    def _tool_frame_name(self) -> str:
-        if self._planner is not None and self._planner.tool_frames:
-            return str(self._planner.tool_frames[0])
-        return "gripper"
-
-    def _ensure_markers(self, env: gym.Env) -> None:
-        if not self.config.debug_viz:
-            return
-        if self._goal_marker is not None and self._ee_marker is not None:
-            return
-
-        from isaaclab.markers import VisualizationMarkers
-        from isaaclab.markers.config import FRAME_MARKER_CFG
-
-        scale = float(self.config.marker_frame_scale)
-
-        goal_cfg = FRAME_MARKER_CFG.copy()
-        goal_cfg.prim_path = "/Visuals/CuroboPolicy/goal_frame"
-        goal_cfg.markers["frame"].scale = (scale, scale, scale)
-        self._goal_marker = VisualizationMarkers(goal_cfg)
-
-        ee_cfg = FRAME_MARKER_CFG.copy()
-        ee_cfg.prim_path = "/Visuals/CuroboPolicy/ee_frame"
-        ee_cfg.markers["frame"].scale = (scale, scale, scale)
-        self._ee_marker = VisualizationMarkers(ee_cfg)
-
-        robot = env.unwrapped.scene["robot"]
-        tool = self._tool_frame_name()
-        body_ids, body_names = robot.find_bodies(tool)
-        if not body_ids:
-            raise RuntimeError(
-                f"CuroboPolicy debug viz: robot has no body matching tool frame '{tool}'. "
-                f"Have: {list(robot.body_names)}"
-            )
-        self._ee_body_id = int(body_ids[0])
-        print(f"[CuroboPolicy] Debug markers ready (goal frame + EE frame '{body_names[0]}').")
-
-    def _update_debug_viz(self, env: gym.Env, device: torch.device) -> None:
-        if not self.config.debug_viz:
-            return
-
-        import warp as wp
-
-        self._ensure_markers(env)
-        assert self._goal_marker is not None and self._ee_marker is not None
-        assert self._ee_body_id is not None
-
-        robot = env.unwrapped.scene["robot"]
-        num_envs = env.unwrapped.num_envs
-
-        goal_pos_w, goal_quat_xyzw = self._goal_pose_w(env, device, num_envs)
-        self._goal_marker.visualize(translations=goal_pos_w, orientations=goal_quat_xyzw)
-
-        ee_pose_w = wp.to_torch(robot.data.body_link_pose_w)[:, self._ee_body_id, :].to(
-            device=device, dtype=torch.float32
-        )
-        self._ee_marker.visualize(translations=ee_pose_w[:, 0:3], orientations=ee_pose_w[:, 3:7])

@@ -55,6 +55,27 @@ python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \
 The viewer should show the environment with the default embodiment.
 <img width="2488" height="1378" alt="shape-sorting-env-kit-franka" src="https://github.com/user-attachments/assets/adc9c370-7958-4514-8bce-4b68b8a02dad" />
 
+### cuRobo SO-101 reach smoke test
+
+Plans once to a fixed EE pose with cuRobo, then plays absolute joint waypoints
+(``so101_abs_joint``). Requires a generated ``so101.yml``
+(``python -m arena_so101.generate_curobo_config``).
+
+```bash
+python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \
+  --viz kit \
+  --policy_type shape_sorting.curobo_policy.CuroboPolicy \
+  --num_steps 200 \
+  --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \
+  shape_sorting_test \
+  --embodiment so101_abs_joint
+```
+
+Goal XY is placed on the robot-base → ``goal_object`` line, 3 cm toward the
+robot from the object, at Z = 10 cm (robot base frame), with tilt/roll = 0
+(top-down). Override the object with ``--goal_object <scene_name>``
+(default ``shape_piece_cube``).
+
 
 
 
