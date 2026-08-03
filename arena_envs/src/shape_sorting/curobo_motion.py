@@ -322,6 +322,7 @@ class MotionClient:
         # map spheres into the EE frame ourselves, then update with no pose offset.
         print(f"[MotionClient] ATTACH obstacles={names}")
         with torch.inference_mode(False):
+            self.sync_world(env)
             am = planner.attachment_manager
             q = self.planner_joint_state(env, device)
             spheres_w = am.fit_spheres(

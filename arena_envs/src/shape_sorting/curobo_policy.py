@@ -36,7 +36,7 @@ from shape_sorting.shape_sorting_env import ShapeInfo
 
 # Grasp pose relative to goal_object (robot base frame).
 _GOAL_XY_STANDOFF_M = 0.03
-_GOAL_Z_M = 0.14
+_GOAL_Z_M = 0.145
 _GOAL_TILT_RAD = 0.0
 _GOAL_ROLL_RAD = 0.0
 
@@ -460,7 +460,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         )
         self._motion.ensure_ready(device)
 
-        if cfg.debug_viz:
+        if cfg.debug_viz: # TODO: rename to debug_marker to avoid confiusions with viser visualization
             self._kit_markers = KitFrameMarkers(scale=cfg.marker_frame_scale)
 
         return self._motion
