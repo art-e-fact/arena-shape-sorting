@@ -29,9 +29,10 @@ from gymnasium.spaces.dict import Dict as GymSpacesDict
 from arena_so101.mapping import SIM_JOINT_NAMES
 from isaaclab_arena.assets.register import register_policy
 from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
-from shape_sorting.curobo_motion import MotionClient, MotionClientCfg, resolve_robot_yml
+from shape_sorting.curobo_motion import MotionClient, MotionClientCfg, PlanResult, resolve_robot_yml
 from shape_sorting.curobo_viz import KitFrameMarkers, NullCollisionDebugViz, ViserCollisionDebugViz
-from shape_sorting.curobo_world import entity_position_in_robot_base
+from shape_sorting.curobo_world import entity_pose_in_robot_base, entity_position_in_robot_base
+from shape_sorting.shape_forms import ShapeForm, place_yaw_offsets, yaw_symmetry_order
 from shape_sorting.shape_sorting_env import ShapeInfo
 
 # Grasp pose relative to goal_object (robot base frame).
@@ -317,8 +318,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> torch.Tensor:
         if self._traj is None:
-            goal_xyz, goal_quat = self._place_pose_in_robot_base(env, device, motion)
-            plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="PLACE")
+            plan = self._plan_place(env, device, motion)
             self._traj = plan.waypoints
             self._hold_action = plan.hold_action
             self._step_idx = 0
@@ -524,29 +524,30 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             device=device,
         )
 
-    def _hole_frame_name_for_shape(self, shape: ShapeInfo) -> str:
-        from shape_sorting.shape_asset import SortingBox
-        from shape_sorting.shape_forms import ShapeForm
-
+    def _shape_form(self, shape: ShapeInfo) -> ShapeForm:
         prefix = "shape_piece_"
         if not shape.name.startswith(prefix):
             raise RuntimeError(
-                f"CuroboPolicy: cannot map shape '{shape.name}' to a lid hole; "
+                f"CuroboPolicy: cannot map shape '{shape.name}' to a form; "
                 f"expected a name starting with '{prefix}'."
             )
         form_value = shape.name[len(prefix) :]
         try:
-            form = ShapeForm(form_value)
+            return ShapeForm(form_value)
         except ValueError as exc:
             raise RuntimeError(
                 f"CuroboPolicy: unknown form '{form_value}' in shape '{shape.name}'."
             ) from exc
-        return SortingBox.hole_frame_name(form)
 
-    def _hole_position_in_robot_base(
+    def _hole_frame_name_for_shape(self, shape: ShapeInfo) -> str:
+        from shape_sorting.shape_asset import SortingBox
+
+        return SortingBox.hole_frame_name(self._shape_form(shape))
+
+    def _hole_pose_in_robot_base(
         self, env: gym.Env, device: torch.device
-    ) -> torch.Tensor:
-        """Matched lid-hole origin in the robot base frame. Shape (3,)."""
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Matched lid-hole pose in the robot base frame. ``(pos (3,), quat_xyzw (4,))``."""
         import warp as wp
         from isaaclab.utils.math import subtract_frame_transforms
         from shape_sorting.shape_asset import SortingBox
@@ -580,16 +581,72 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             device=device, dtype=torch.float32
         )
 
-        hole_b, _ = subtract_frame_transforms(
+        hole_b, hole_quat_b = subtract_frame_transforms(
             robot_pose_w[0:3].unsqueeze(0),
             robot_pose_w[3:7].unsqueeze(0),
             hole_pos_w.unsqueeze(0),
             hole_quat_w.unsqueeze(0),
         )
-        return hole_b[0]
+        return hole_b[0], hole_quat_b[0]
+
+    @staticmethod
+    def _yaw_from_quat_xyzw(quat_xyzw: torch.Tensor) -> float:
+        from isaaclab.utils.math import euler_xyz_from_quat
+
+        _, _, yaw = euler_xyz_from_quat(quat_xyzw.reshape(1, 4))
+        return float(yaw[0])
+
+    @staticmethod
+    def _wrap_to_pi(angle: float) -> float:
+        return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _place_roll_candidates(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> list[float]:
+        """SO-101 roll angles that align the grasped piece to the hole (up to symmetry)."""
+        form = self._shape_form(self._current_shape(env))
+        if yaw_symmetry_order(form) is None:
+            # Continuous symmetry: keep nominal EE roll (already reachable).
+            return [_GOAL_ROLL_RAD]
+
+        hole_pos, hole_quat = self._hole_pose_in_robot_base(env, device)
+        obj_desired = hole_pos.clone()
+        obj_desired[2] = obj_desired[2] + float(self.config.place_z_offset_m)
+        _, quat_ee0 = so101_ee_pose_xyzw(
+            float(obj_desired[0]),
+            float(obj_desired[1]),
+            float(obj_desired[2]),
+            tilt=_GOAL_TILT_RAD,
+            roll=_GOAL_ROLL_RAD,
+            device=device,
+        )
+
+        shape = self._current_shape(env)
+        obj_pose = entity_pose_in_robot_base(env, shape.name, device=device)
+        from isaaclab.utils.math import convert_quat
+
+        obj_quat_xyzw = convert_quat(obj_pose.quaternion.view(-1)[:4], to="xyzw")
+        q_ee = motion.ee_pose(motion.planner_joint_state(env, device))
+        ee_quat_xyzw = convert_quat(q_ee.quaternion.view(-1)[:4], to="xyzw")
+
+        psi_hole = self._yaw_from_quat_xyzw(hole_quat)
+        psi_obj = self._yaw_from_quat_xyzw(obj_quat_xyzw)
+        psi_ee = self._yaw_from_quat_xyzw(ee_quat_xyzw)
+        psi_ee0 = self._yaw_from_quat_xyzw(quat_ee0)
+        psi_rel = self._wrap_to_pi(psi_obj - psi_ee)
+        roll_0 = self._wrap_to_pi(psi_hole - psi_ee0 - psi_rel)
+
+        rolls = [self._wrap_to_pi(roll_0 + dyaw) for dyaw in place_yaw_offsets(form)]
+        rolls.sort(key=lambda r: abs(r))
+        return rolls
 
     def _place_pose_in_robot_base(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
+        self,
+        env: gym.Env,
+        device: torch.device,
+        motion: MotionClient,
+        *,
+        roll: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Place EE so the grasped object origin sits above the lid hole."""
         from isaaclab.utils.math import quat_apply
@@ -599,18 +656,18 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 "CuroboPolicy PLACE requires a grasp offset; ATTACH must run first."
             )
 
-        hole_b = self._hole_position_in_robot_base(env, device)
+        hole_b, _ = self._hole_pose_in_robot_base(env, device)
         obj_desired = hole_b.clone()
         obj_desired[2] = obj_desired[2] + float(self.config.place_z_offset_m)
 
-        # Seed EE orientation from hole XY, then back out EE position so
+        # Seed EE orientation from hole XY + roll, then back out EE position so
         # R @ grasp_offset places the object at obj_desired.
         _, quat_seed = so101_ee_pose_xyzw(
             float(obj_desired[0]),
             float(obj_desired[1]),
             float(obj_desired[2]),
             tilt=_GOAL_TILT_RAD,
-            roll=_GOAL_ROLL_RAD,
+            roll=roll,
             device=device,
         )
         offset_b = quat_apply(
@@ -624,9 +681,44 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             float(ee_pos[1]),
             float(ee_pos[2]),
             tilt=_GOAL_TILT_RAD,
-            roll=_GOAL_ROLL_RAD,
+            roll=roll,
             device=device,
         )
+
+    def _plan_place(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> PlanResult:
+        """Plan PLACE over yaw-symmetry roll candidates until one succeeds."""
+        form = self._shape_form(self._current_shape(env))
+        rolls = self._place_roll_candidates(env, device, motion)
+        print(
+            f"[CuroboPolicy] PLACE {form.value}: trying {len(rolls)} yaw candidate(s) "
+            f"(rolls deg={[round(math.degrees(r), 1) for r in rolls]})."
+        )
+        last_plan: PlanResult | None = None
+        for i, roll in enumerate(rolls):
+            goal_xyz, goal_quat = self._place_pose_in_robot_base(
+                env, device, motion, roll=roll
+            )
+            plan = motion.plan_to_pose(
+                env,
+                device,
+                goal_xyz,
+                goal_quat,
+                label=f"PLACE[{i + 1}/{len(rolls)} roll={math.degrees(roll):.1f}°]",
+            )
+            last_plan = plan
+            if plan.success:
+                print(
+                    f"[CuroboPolicy] PLACE succeeded with roll={math.degrees(roll):.1f}° "
+                    f"(candidate {i + 1}/{len(rolls)})."
+                )
+                return plan
+        assert last_plan is not None
+        print(
+            f"[CuroboPolicy] PLACE failed for all {len(rolls)} yaw candidate(s)."
+        )
+        return last_plan
 
     def _goal_pose_w(
         self, env: gym.Env, device: torch.device, motion: MotionClient
