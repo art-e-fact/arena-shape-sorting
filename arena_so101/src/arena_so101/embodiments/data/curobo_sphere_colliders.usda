@@ -7,8 +7,8 @@
                 double radius = 5
             }
             dictionary Perspective = {
-                double3 position = (0.6493144290784032, 0.14803490860827456, 0.382673499302351)
-                double3 target = (0.018846786781239966, -0.32128867304223346, 0.18772596570657285)
+                double3 position = (0.4771842444389566, 0.07358962105691348, 0.30121090085077357)
+                double3 target = (-0.0000864616513225891, -0.2816933184180037, 0.15363354593560902)
             }
             dictionary Right = {
                 double3 position = (0, -5, 0)
@@ -29,6 +29,7 @@
         }
         int refinementOverrideImplVersion = 0
         dictionary renderSettings = {
+            int "rtx:wireframe:mode" = 1
         }
     }
     defaultPrim = "World"
@@ -78,13 +79,13 @@ def Xform "World"
         {
             def Sphere "curobo_collider_sphere"
             {
-                float3[] extent = [(-0.005, -0.005, -0.005), (0.005, 0.005, 0.005)]
-                double radius = 0.005
+                float3[] extent = [(-0.004, -0.004, -0.004), (0.004, 0.004, 0.004)]
+                double radius = 0.004
                 custom bool refinementEnableOverride = 1
                 custom int refinementLevel = 2
                 quatd xformOp:orient = (0.7071046316882184, -0.0000028238370219924028, 0.7071089306555096, -0.000004931191485868512)
                 double3 xformOp:scale = (1, 1, 1)
-                double3 xformOp:translate = (-0.010831316672079982, -0.00042682858100895685, -0.09984958304132358)
+                double3 xformOp:translate = (-0.011601776404440378, -0.00042682628482566126, -0.09984957835710845)
                 uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
             }
 
@@ -176,6 +177,7 @@ def "Render" (
                 float omni:rtx:rtpt:modulatingRoughnessThreshold = 0.08
                 bool omni:rtx:scene:hydra:materialSyncLoads = 1
                 bool omni:rtx:scene:hydra:mdlMaterialWarmup = 1
+                token omni:rtx:wireframe:mode = "shaded"
                 rel orderedVars = </Render/Vars/LdrColor>
                 custom bool overrideClipRange = 0
                 uniform int2 resolution = (1280, 720)
@@ -225,10 +227,10 @@ over "OmniverseKit_Persp" (
     float exposure:time = 0.02
     float focalLength = 18.147562
     float focusDistance = 400
-    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -0.8097892399458526)
+    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -0.613019061414576)
     float3 xformOp:rotateXYZ = (76.06986, -3.4986103e-14, 126.6642)
     float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (0.6493144290784032, 0.14803490860827456, 0.382673499302351)
+    double3 xformOp:translate = (0.4771842444389566, 0.07358962105691348, 0.30121090085077357)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
 }
 

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import gymnasium as gym
     import torch
-    from curobo.motion_planner import MotionPlanner
+    from curobo.motion_planner import MotionPlanner 
     from curobo.scene import Scene
     from curobo.types import Pose
 

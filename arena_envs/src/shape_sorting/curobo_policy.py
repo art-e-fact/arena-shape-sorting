@@ -161,7 +161,7 @@ class CuroboPolicyCfg(PolicyCfg):
     waypoint_stride: int = 2
     """Play every N-th interpolated waypoint (1 = all)."""
 
-    debug_viz: bool = True
+    debug_viz: bool = False
     """Draw goal + EE frame markers in the Kit viewport."""
 
     debug_viser: bool = False

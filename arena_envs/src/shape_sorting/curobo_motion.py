@@ -45,7 +45,7 @@ except Exception:
 _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
 
 # so101.yml extra_collision_spheres.attached_object
-_ATTACH_NUM_SPHERES = 16
+_ATTACH_NUM_SPHERES = 36
 _ATTACH_SURFACE_RADIUS = 0.006
 
 

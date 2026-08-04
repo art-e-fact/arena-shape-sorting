@@ -388,7 +388,7 @@ def patch_so101_robot_yaml(
     # Grasp attach frame (same pattern as franka.yml) — parent is the EE link.
     # Builder may serialize these fields as explicit nulls; setdefault won't replace None.
     extra_spheres = _ensure_mapping(kin, "extra_collision_spheres")
-    extra_spheres["attached_object"] = 16
+    extra_spheres["attached_object"] = 36
     extra_links = _ensure_mapping(kin, "extra_links")
     extra_links["attached_object"] = {
         "fixed_transform": [0, 0, 0, 1, 0, 0, 0],
