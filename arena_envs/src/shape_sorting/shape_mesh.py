@@ -133,7 +133,7 @@ def _apply_mesh_collision(stage: Usd.Stage, mesh_prim_path: str, approximation: 
         # MeshCollisionAPI(approximation=sdf) alone is not enough; PhysX also needs
         # PhysxSDFMeshCollisionAPI (resolution, etc.) for cooking / debug viz.
         schemas.define_mesh_collision_properties(
-            mesh_prim_path, schemas_cfg.SDFMeshPropertiesCfg(), stage=stage
+            mesh_prim_path, schemas_cfg.SDFMeshPropertiesCfg(sdf_resolution=256), stage=stage
         )
     else:
         mesh_collision_api = UsdPhysics.MeshCollisionAPI.Apply(stage.GetPrimAtPath(mesh_prim_path))

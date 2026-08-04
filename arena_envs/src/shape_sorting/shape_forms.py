@@ -43,6 +43,7 @@ class ShapeForm(Enum):
     CUBE = "cube"
     CYLINDER = "cylinder"
     TRIANGLE = "triangle"
+    PENTAGON = "pentagon"
     HEXAGON = "hexagon"
     STAR = "star"
     CROSS = "cross"
@@ -50,11 +51,39 @@ class ShapeForm(Enum):
 
 _CHAMFER_SKIP_FORMS = frozenset({ShapeForm.STAR, ShapeForm.CROSS})
 
+# n-fold rotational symmetry about the extrusion (Z) axis. None = continuous.
+_YAW_SYMMETRY_ORDER: dict[ShapeForm, int | None] = {
+    ShapeForm.CUBE: 4,
+    ShapeForm.CYLINDER: None,
+    ShapeForm.TRIANGLE: 3,
+    ShapeForm.PENTAGON: 5,
+    ShapeForm.HEXAGON: 6,
+    ShapeForm.STAR: 5,
+    ShapeForm.CROSS: 4,
+}
+
 DEFAULT_FORMS: tuple[ShapeForm, ...] = (
     ShapeForm.CUBE,
     ShapeForm.CYLINDER,
     ShapeForm.HEXAGON,
 )
+
+
+def yaw_symmetry_order(form: ShapeForm) -> int | None:
+    """n-fold rotational symmetry about Z. ``None`` means continuous (any yaw OK)."""
+    return _YAW_SYMMETRY_ORDER[form]
+
+
+def place_yaw_offsets(form: ShapeForm) -> tuple[float, ...]:
+    """Yaw offsets [rad] that leave the silhouette unchanged relative to its hole.
+
+    Cylinder (continuous symmetry) returns ``(0.0,)`` so place keeps the nominal
+    EE roll and does not force hole-yaw alignment.
+    """
+    order = yaw_symmetry_order(form)
+    if order is None:
+        return (0.0,)
+    return tuple(2.0 * math.pi * i / order for i in range(order))
 
 
 def _center_on_origin(solid):
@@ -133,6 +162,8 @@ def add_form_profile(form: ShapeForm, size: float) -> None:
         Circle(half)
     elif form is ShapeForm.TRIANGLE:
         RegularPolygon(half, 3)
+    elif form is ShapeForm.PENTAGON:
+        RegularPolygon(half, 5)
     elif form is ShapeForm.HEXAGON:
         RegularPolygon(half, 6)
     elif form is ShapeForm.STAR:
