@@ -146,6 +146,9 @@ class CuroboPolicyCfg(PolicyCfg):
     jaw_empty_tol: float = math.radians(5.0)
     """If measured jaw is within this of ``jaw_closed`` after CLOSE, treat grasp as empty."""
 
+    max_grasp_retries: int = 5
+    """Max APPROACH→CLOSE attempts per shape before aborting (empty grasps)."""
+
     open_steps: int = 20
     """Sim steps to hold the open jaw before HOME."""
 
@@ -191,6 +194,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._traj: torch.Tensor | None = None
         self._step_idx = 0
         self._phase_steps = 0
+        self._grasp_attempts = 0
         self._hold_action: torch.Tensor | None = None
         self._shape_idx = 0
         self._shapes: list[ShapeInfo] | None = None
@@ -207,6 +211,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._traj = None
         self._step_idx = 0
         self._phase_steps = 0
+        self._grasp_attempts = 0
         self._hold_action = None
         self._shape_idx = 0
         self._shapes = None
@@ -266,10 +271,13 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     ) -> torch.Tensor:
         if self._traj is None:
             motion.detach()  # free-space approach must not carry a previous attach
+            self._grasp_attempts += 1
             shape = self._current_shape(env)
+            max_attempts = max(1, int(self.config.max_grasp_retries))
             print(
                 f"[CuroboPolicy] APPROACH shape {self._shape_idx + 1}/"
-                f"{len(self._resolve_shapes(env))} ({shape.name})."
+                f"{len(self._resolve_shapes(env))} ({shape.name}) "
+                f"grasp attempt {self._grasp_attempts}/{max_attempts}."
             )
             goal_xyz, goal_quat = self._grasp_pose_in_robot_base(env, device)
             plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="APPROACH")
@@ -296,9 +304,20 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
         jaw = motion.measured_jaw(env, device)
         if self._jaw_is_fully_closed(jaw):
+            max_attempts = max(1, int(self.config.max_grasp_retries))
+            if self._grasp_attempts >= max_attempts:
+                print(
+                    f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
+                    f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — "
+                    f"empty grasp after {self._grasp_attempts}/{max_attempts} "
+                    f"attempt(s) → DONE."
+                )
+                self._phase = Phase.DONE
+                return action
             print(
                 f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
-                f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp → APPROACH."
+                f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp "
+                f"({self._grasp_attempts}/{max_attempts}) → APPROACH."
             )
             self._phase = Phase.APPROACH
             self._traj = None
@@ -309,6 +328,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
         print(f"[CuroboPolicy] CLOSE done (jaw={float(jaw):.3f}) → ATTACH.")
         self._phase = Phase.ATTACH
+        self._grasp_attempts = 0
         return action
 
     def _step_attach(
@@ -362,6 +382,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             self._traj = None
             self._step_idx = 0
             self._phase_steps = 0
+            self._grasp_attempts = 0
             motion.clear_last_goal()
             return self._step_approach(env, device, motion)
 
