@@ -11,6 +11,10 @@ Fork of Arena ``record_demos.py`` (HDF5 export / success filtering) + ``policy_r
 
 Only episodes marked successful are written (``EXPORT_SUCCEEDED_ONLY``).
 
+Scripted policies may implement ``is_demonstration_ended() -> bool`` so a finished
+sequence ends the episode early instead of waiting for timeout (failed attempt if
+task success has not held for ``--num_success_steps``).
+
 Example::
 
     python -m shape_sorting.generate_policy_demos \\
@@ -168,6 +172,16 @@ def _is_success(base_env: gym.Env, success_term: TerminationTermCfg) -> bool:
     return bool(success_term.func(base_env, **success_term.params)[0])
 
 
+def _is_demonstration_ended(policy: PolicyBase) -> bool:
+    """Duck-typed hook for scripted policies that know when their sequence is over.
+
+    Arena ``PolicyBase`` has no such API; policies used for synthetic demos may
+    implement ``is_demonstration_ended() -> bool`` (e.g. ``CuroboPolicy``).
+    """
+    check = getattr(policy, "is_demonstration_ended", None)
+    return bool(check()) if callable(check) else False
+
+
 def collect_policy_demos(
     env: gym.Env,
     policy: PolicyBase,
@@ -247,6 +261,24 @@ def collect_policy_demos(
                     f"Failed episode {num_failed}"
                     + (f"/{max_retries}" if max_retries is not None else "")
                     + f" (successes: {num_successful}/{generation_num_trials})."
+                )
+                continue
+
+            # Scripted policy finished without task success — end early instead of
+            # waiting for episode timeout. If success is already holding, keep
+            # stepping until num_success_steps exports above.
+            if _is_demonstration_ended(policy) and success_step_count == 0:
+                num_failed += 1
+                print(
+                    f"Policy demonstration ended without success — failed episode "
+                    f"{num_failed}"
+                    + (f"/{max_retries}" if max_retries is not None else "")
+                    + f" (successes: {num_successful}/{generation_num_trials})."
+                )
+                obs = _reset_recording_episode(
+                    env,
+                    policy,
+                    disable_full_sim_buffer_reset=disable_full_sim_buffer_reset,
                 )
 
     return num_successful, num_failed

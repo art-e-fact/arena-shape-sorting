@@ -208,6 +208,10 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._shape_idx = 0
         self._shapes = None
 
+    def is_demonstration_ended(self) -> bool:
+        """True after the scripted sequence has finished (HOME → DONE)."""
+        return self._phase is Phase.DONE
+
     def close(self) -> None:
         if self._motion is not None:
             self._motion.close()
