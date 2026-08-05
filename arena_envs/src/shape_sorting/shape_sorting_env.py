@@ -182,7 +182,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             pick_up_object_list=layout.pieces,
             destination_location_list=[layout.box] * len(layout.pieces),
             background_scene=background,
-            episode_length_s=120.0,
+            episode_length_s=40.0,
         )
         cavity = layout.box.get_inner_bounding_box()
         task.termination_cfg.success = TerminationTermCfg(
