@@ -293,11 +293,13 @@ def build_sorting_box_parts(
     hole_gap: float = 0.012,
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER,
     tolerance: float | None = None,
-) -> tuple[tuple[MeshPart, ...], tuple[tuple[float, float], ...]]:
-    """Build wall / lid / bottom meshes and return hole XY centers in box frame.
+) -> tuple[tuple[MeshPart, ...], tuple[tuple[float, float], ...], AxisAlignedBoundingBox]:
+    """Build wall / lid / bottom meshes and return hole centers plus cavity AABB.
 
     Holes are packed in a near-square grid; outer XY size follows ``cols`` /
-    ``rows``, the largest form, and ``clearance``. AABB is origin-centered.
+    ``rows``, the largest form, and ``clearance``. Outer and cavity AABBs are
+    origin-centered. The cavity is the empty volume inside the walls, above the
+    bottom, and below the lid.
     """
     from build123d import Align, Axis, Box, BuildPart, Location, Mode, Select, add, chamfer
 
@@ -405,4 +407,8 @@ def build_sorting_box_parts(
         # Concave lid: keep holes traversable for insertion.
         MeshPart("lid", mesh_data_from_solid(lid, tolerance), "sdf"),
     )
-    return parts, hole_centers
+    cavity_aabb = AxisAlignedBoundingBox(
+        min_point=(-0.5 * inner_x, -0.5 * inner_y, -0.5 * box_height + bottom_thickness),
+        max_point=(0.5 * inner_x, 0.5 * inner_y, 0.5 * box_height - lid_thickness),
+    )
+    return parts, hole_centers, cavity_aabb

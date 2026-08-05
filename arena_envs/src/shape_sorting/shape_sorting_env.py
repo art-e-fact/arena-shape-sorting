@@ -67,7 +67,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
     def build(self, cfg: ShapeSortingEnvironmentCfg) -> IsaacLabArenaEnvironment:
         """Build the environment from its typed configuration."""
         from isaaclab.envs.common import ViewerCfg
-        from isaaclab.managers import TerminationTermCfg
+        from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
 
         from isaaclab_arena.assets.object_base import ObjectType
         from isaaclab_arena.assets.object_reference import ObjectReference
@@ -78,6 +78,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.utils.pose import Pose
 
         from shape_sorting.debug_key_reset import debug_key_reset_termination
+        from shape_sorting.predicates import objects_centers_inside_aabb
         from shape_sorting.shape_asset import SortingBox, make_shape_sorting_layout
 
         # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
@@ -106,8 +107,6 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             edge_chamfer=cfg.edge_chamfer,
             hole_chamfer=cfg.hole_chamfer,
         )
-        pieces = layout.pieces
-        box = layout.box
 
         # Describe spatial relationships.
         table_reference = ObjectReference(
@@ -178,14 +177,24 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             ]
         )
 
-        # Place-all task: every piece must contact the shared sorting box.
+        # Place-all task: success when every piece center is inside the box cavity.
         task = SortMultiObjectTask(
-            pick_up_object_list=pieces,
-            destination_location_list=[box] * len(pieces),
+            pick_up_object_list=layout.pieces,
+            destination_location_list=[layout.box] * len(layout.pieces),
             background_scene=background,
             episode_length_s=120.0,
         )
-        task.termination_cfg.success.params["force_threshold"] = 0.1
+        cavity = layout.box.get_inner_bounding_box()
+        task.termination_cfg.success = TerminationTermCfg(
+            func=objects_centers_inside_aabb,
+            params={
+                "object_cfg_list": [SceneEntityCfg(piece.name) for piece in layout.pieces],
+                "container_cfg": SceneEntityCfg(layout.box.name),
+                "aabb_min": tuple(cavity.min_point[0].tolist()),
+                "aabb_max": tuple(cavity.max_point[0].tolist()),
+                "velocity_threshold": 0.1,
+            },
+        )
 
         # Privileged lid-hole frames (box-local offsets) for policies / debug viz.
         from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg
@@ -193,7 +202,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.utils.configclass import combine_configclass_instances, make_configclass
 
         # TODO: debug_vis should be a parameter in the environment cfg.
-        hole_frames_cfg = box.get_hole_frames_cfg(debug_vis=False)
+        hole_frames_cfg = layout.box.get_hole_frames_cfg(debug_vis=False)
         HoleFramesSceneCfg = make_configclass(
             "HoleFramesSceneCfg",
             [(SortingBox.HOLE_FRAMES_SENSOR_NAME, FrameTransformerCfg, hole_frames_cfg)],
@@ -207,7 +216,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         # Privileged layout metadata + viewer / debug hooks for the manager env cfg.
         def _configure_env_cfg(env_cfg):
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
-            env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in pieces]
+            env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in layout.pieces]
             if cfg.debug_key_reset:
                 # Truncation (not success): ends the episode so policy_runner resets and continues.
                 env_cfg.terminations.debug_key_reset = TerminationTermCfg(

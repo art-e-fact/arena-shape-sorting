@@ -155,9 +155,8 @@ class SortingBox(Object):
     """Box that collects sorting pieces through form-matched lid holes.
 
     Side walls, bottom, and lid are authored as separate mesh prims under
-    ``geometry/<part>/mesh`` so contact filters can target individual faces.
-    Outer size follows a near-square hole grid over ``forms``, sized from
-    ``form_sizes`` and ``clearance``.
+    ``geometry/<part>/mesh``. Outer size follows a near-square hole grid over
+    ``forms``, sized from ``form_sizes`` and ``clearance``.
     """
 
     name = "sorting_box"
@@ -199,7 +198,7 @@ class SortingBox(Object):
         self.hole_gap = hole_gap
         self.hole_chamfer = hole_chamfer
 
-        self._parts, self.hole_centers = build_sorting_box_parts(
+        self._parts, self.hole_centers, self._cavity_aabb = build_sorting_box_parts(
             forms=self.forms,
             form_sizes=self.form_sizes,
             box_height=self.box_height,
@@ -222,11 +221,9 @@ class SortingBox(Object):
             initial_pose=initial_pose,
         )
 
-    def part_prim_path(self, part_name: str) -> str:
-        """Absolute prim path expression for a named box part (for contact filters)."""
-        if part_name not in self.PART_NAMES:
-            raise ValueError(f"Unknown sorting-box part '{part_name}'. Expected one of {self.PART_NAMES}.")
-        return f"{self.prim_path}/geometry/{part_name}"
+    def get_inner_bounding_box(self) -> AxisAlignedBoundingBox:
+        """Local AABB of the empty cavity (inside walls, above bottom, below lid)."""
+        return self._cavity_aabb
 
     @property
     def lid_top_z(self) -> float:
