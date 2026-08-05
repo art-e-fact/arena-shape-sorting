@@ -58,6 +58,7 @@ class MotionClientCfg:
     orientation_tolerance: float = 0.1
     use_cuda_graph: bool = False
     self_collision_check: bool = False
+    optimizer_collision_activation_distance: float = 0.01
     waypoint_stride: int = 2
     attach_num_spheres: int = _ATTACH_NUM_SPHERES
     attach_surface_radius: float = _ATTACH_SURFACE_RADIUS
@@ -156,6 +157,9 @@ class MotionClient:
                 use_cuda_graph=self.cfg.use_cuda_graph,
                 position_tolerance=self.cfg.position_tolerance,
                 orientation_tolerance=self.cfg.orientation_tolerance,
+                optimizer_collision_activation_distance=(
+                    self.cfg.optimizer_collision_activation_distance
+                ),
                 device_cfg=DeviceCfg(device=device, dtype=torch.float32),
             )
             self._planner = MotionPlanner(cfg)

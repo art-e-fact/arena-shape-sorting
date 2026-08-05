@@ -158,6 +158,9 @@ class CuroboPolicyCfg(PolicyCfg):
     self_collision_check: bool = False
     """Enable self-collision costs."""
 
+    optimizer_collision_activation_distance: float = 0.03
+    """Soft collision-cost activation distance [m]; larger keeps more clearance."""
+
     waypoint_stride: int = 2
     """Play every N-th interpolated waypoint (1 = all)."""
 
@@ -458,6 +461,9 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 orientation_tolerance=cfg.orientation_tolerance,
                 use_cuda_graph=cfg.use_cuda_graph,
                 self_collision_check=cfg.self_collision_check,
+                optimizer_collision_activation_distance=(
+                    cfg.optimizer_collision_activation_distance
+                ),
                 waypoint_stride=cfg.waypoint_stride,
             ),
             debug=debug,
