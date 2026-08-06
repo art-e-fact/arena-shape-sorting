@@ -2,6 +2,12 @@
 
 # IsaacLab-Arena shape-sorting environment and SO-101 embodiment
 
+
+
+https://github.com/user-attachments/assets/968bfb1a-6e5e-4aad-8be3-4ee7267268d3
+
+
+
 The repository contains a shape-sorting game environment with procedurally generated shape pieces and a sorting box and an SO-101 embodiment implementation.
 
 ## Set up workspace
