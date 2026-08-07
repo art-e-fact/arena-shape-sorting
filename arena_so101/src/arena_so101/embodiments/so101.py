@@ -1,8 +1,9 @@
 """SO-101 follower embodiments for Isaac Lab Arena.
 
 USD and joint names follow the NVIDIA Sim-to-Real SO-101 workshop
-(``Rotation`` … ``Jaw``). Wrist RGB is a Python ``TiledCameraCfg`` on
-``Robot/gripper/gripper_cam`` — not a baked Isaac Lab sensor in the USD.
+(``Rotation`` … ``Jaw``). Cameras are Python ``CameraCfg`` sensors:
+wrist RGB on ``Robot/gripper/gripper_cam``, plus a fixed env-frame
+``external_camera`` (over-shoulder / table view). Neither is baked into the USD.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from isaaclab.managers import ActionTermCfg
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import FrameTransformerCfg, TiledCameraCfg
+from isaaclab.sensors import CameraCfg, FrameTransformerCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_from_euler_xyz
 
@@ -220,7 +221,7 @@ class SO101ObservationsCfg:
 @configclass
 class SO101CameraCfg(ArenaCameraCfg):
     # Workshop ego cam: spawn at gripper mount, offset into the real lens frame.
-    camera_ego: TiledCameraCfg = TiledCameraCfg(
+    camera_ego: CameraCfg = CameraCfg(
         prim_path="{ENV_REGEX_NS}/Robot/gripper/gripper_cam",
         update_period=0.0,
         height=480,
@@ -232,10 +233,34 @@ class SO101CameraCfg(ArenaCameraCfg):
             focal_length=13.5,
             focus_distance=0.05,
         ),
-        offset=TiledCameraCfg.OffsetCfg(
+        offset=CameraCfg.OffsetCfg(
             pos=(-0.005, 0.06, -0.062),
             rot=_quat_xyzw_from_euler_deg(-45.0, 0.0, 0.0),
             convention="opengl",
+        ),
+    )
+
+    # Fixed third-person / over-shoulder view (env frame). Pose is a sensible
+    # default; task envs (e.g. shape sorting) may override the offset.
+    external_camera: CameraCfg = CameraCfg(
+        prim_path="{ENV_REGEX_NS}/external_camera",
+        update_period=0.0,
+        height=480,
+        width=640,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            projection_type="pinhole",
+            f_stop=2000.0,
+            focal_length=30.0,
+            focus_distance=100.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.1, 2.0),
+        ),
+        # Same look as Isaac Lab Franka ``table_cam``, shifted to the side.
+        offset=CameraCfg.OffsetCfg(
+            pos=(1.0, -0.55, 0.75),
+            rot=(-0.61237, -0.61237, 0.35355, 0.35355),
+            convention="ros",
         ),
     )
 
@@ -255,6 +280,9 @@ class SO101EmbodimentBase(EmbodimentBase):
         super().__init__(enable_cameras, initial_pose, concatenate_observation_terms, arm_mode)
         self.scene_config = SO101SceneCfg()
         self.camera_config = SO101CameraCfg()
+        # Isaac Lab 4.6+: CameraCfg already includes tiled rendering; avoid
+        # Arena's conversion back to deprecated TiledCameraCfg.
+        self.camera_config.set_use_tiled_camera(False)
         self.observation_config = SO101ObservationsCfg()
         if concatenate_observation_terms:
             self.observation_config.policy.concatenate_terms = True

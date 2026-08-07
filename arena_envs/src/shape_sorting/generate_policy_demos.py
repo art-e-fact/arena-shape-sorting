@@ -1,15 +1,15 @@
 # Copyright (c) 2026, The Isaac Lab Arena Project Developers.
 # SPDX-License-Identifier: Apache-2.0
-"""Record successful imitation-learning demos by rolling out a scripted Arena policy.
+"""Record successful LeRobot v3 demos by rolling out a scripted Arena policy.
 
-Fork of Arena ``record_demos.py`` (HDF5 export / success filtering) + ``policy_runner.py``
-(policy CLI / rollout), with a ``generate_dataset.py``-style stop condition:
+Fork of Arena ``policy_runner.py`` with success filtering and a
+``generate_dataset.py``-style stop condition:
 
 * ``--generation_num_trials`` — target number of successful demos
 * ``--max_retries`` — stop after this many failed episodes (optional)
-* ``--output_file`` — HDF5 path for exported demos
+* ``--output_dir`` — local LeRobot v3 dataset root
 
-Only episodes marked successful are written (``EXPORT_SUCCEEDED_ONLY``).
+Only successful episodes are committed; failed episodes are discarded.
 
 Scripted policies may implement ``is_demonstration_ended() -> bool`` so a finished
 sequence ends the episode early instead of waiting for timeout (failed attempt if
@@ -22,7 +22,8 @@ Example::
       --policy_type shape_sorting.curobo_policy.CuroboPolicy \\
       --generation_num_trials 10 \\
       --max_retries 40 \\
-      --output_file ./datasets/curobo_shape_sorting.hdf5 \\
+      --output_dir ./datasets/curobo_shape_sorting \\
+      --dataset_repo_id local/curobo_shape_sorting \\
       --debug_viser \\
       shape_sorting_test \\
       --embodiment so101_abs_joint
@@ -30,20 +31,26 @@ Example::
 
 from __future__ import annotations
 
-import os
+import math
 from typing import TYPE_CHECKING, Any
 
 from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
 from isaaclab_arena.evaluation.policy_runner import get_policy_cls
-from isaaclab_arena.evaluation.policy_runner_cli import add_policy_cli_args, build_policy_from_cli
+from isaaclab_arena.evaluation.policy_runner_cli import (
+    add_policy_cli_args,
+    build_policy_from_cli,
+)
 from isaaclab_arena.utils.hydra_overrides import assert_hydra_overrides
 from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
-from isaaclab_arena_environments.cli import get_arena_builder_from_cli, get_isaaclab_arena_environments_cli_parser
+from isaaclab_arena_environments.cli import (
+    get_arena_builder_from_cli,
+    get_isaaclab_arena_environments_cli_parser,
+)
 
 if TYPE_CHECKING:
     import gymnasium as gym
+    from arena_so101.lerobot.recorder import SO101LeRobotRecorder
     from isaaclab.managers import TerminationTermCfg
-
     from isaaclab_arena.policy.policy_base import PolicyBase
 
 
@@ -78,16 +85,44 @@ def _add_generation_arguments(parser) -> None:
         help="Stop after this many failed episodes (successful demos do not count). Default: unlimited.",
     )
     parser.add_argument(
-        "--output_file",
+        "--output_dir",
         type=str,
-        default="./datasets/policy_dataset.hdf5",
-        help="HDF5 path for exported successful demos.",
+        default="./datasets/curobo_shape_sorting",
+        help="Local root directory for the LeRobot v3 dataset.",
+    )
+    parser.add_argument(
+        "--dataset_repo_id",
+        type=str,
+        default="local/curobo_shape_sorting",
+        help="LeRobot dataset identifier stored in metadata.",
+    )
+    output_mode = parser.add_mutually_exclusive_group()
+    output_mode.add_argument(
+        "--resume",
+        action="store_true",
+        help="Append to an existing compatible dataset in --output_dir.",
+    )
+    output_mode.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Delete and recreate an existing --output_dir.",
+    )
+    parser.add_argument(
+        "--disable_streaming_encoding",
+        action="store_true",
+        help="Write temporary PNGs and encode videos at episode end instead of streaming.",
+    )
+    parser.add_argument(
+        "--task_description",
+        type=str,
+        default=None,
+        help="Dataset task text. Defaults to the environment language instruction.",
     )
     parser.add_argument(
         "--num_success_steps",
         type=int,
         default=10,
-        help="Consecutive steps with task success required before exporting a demo.",
+        help="Consecutive steps with task success required before saving a demo.",
     )
     parser.add_argument(
         "--disable_full_sim_buffer_reset",
@@ -97,59 +132,34 @@ def _add_generation_arguments(parser) -> None:
     )
 
 
-def _setup_output_paths(output_file: str) -> tuple[str, str]:
-    output_dir = os.path.dirname(output_file) or "."
-    output_file_name = os.path.splitext(os.path.basename(output_file))[0]
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"Created output directory: {output_dir}")
-    return output_dir, output_file_name
-
-
-def _configure_env_for_recording(
-    env_cfg: Any,
-    args_cli: Any,
-    output_dir: str,
-    output_file_name: str,
-) -> Any:
-    """Attach IL recorders and extract the success term (polled in the rollout loop)."""
-    from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
-    from isaaclab.managers import DatasetExportMode
-
-    from isaaclab_arena.utils.isaaclab_utils.recorders import ArenaEnvRecorderManagerCfg
-
-    success_term = None
+def _configure_env_for_recording(env_cfg: Any) -> Any:
+    """Disable success termination and return the term for manual polling."""
     if hasattr(env_cfg.terminations, "success"):
         success_term = env_cfg.terminations.success
         env_cfg.terminations.success = None
     else:
         raise NotImplementedError(
             "No success termination term was found in the environment. "
-            "Cannot mark demos as successful for EXPORT_SUCCEEDED_ONLY."
+            "Cannot filter LeRobot episodes by success."
         )
 
     # Keep time_out so failed rollouts truncate and free the retry budget.
     env_cfg.observations.policy.concatenate_terms = False
-
-    if args_cli.enable_cameras:
-        env_cfg.recorders = ArenaEnvRecorderManagerCfg()
-    else:
-        env_cfg.recorders = ActionStateRecorderManagerCfg()
-    env_cfg.recorders.dataset_export_dir_path = output_dir
-    env_cfg.recorders.dataset_filename = output_file_name
-    env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    env_cfg.recorders = None
 
     return success_term
 
 
-def _export_successful_episode(base_env: gym.Env) -> None:
+def _get_processed_actions(base_env: gym.Env):
+    """Return the concatenated action targets applied during the latest step."""
     import torch
 
-    base_env.recorder_manager.record_pre_reset([0], force_export_or_skip=False)
-    base_env.recorder_manager.set_success_to_episodes(
-        [0], torch.tensor([[True]], dtype=torch.bool, device=base_env.device)
-    )
-    base_env.recorder_manager.export_episodes([0])
+    processed_actions = [
+        base_env.action_manager.get_term(term_name).processed_actions
+        for term_name in base_env.action_manager.active_terms
+    ]
+    assert processed_actions, "The environment has no active action terms"
+    return torch.cat(processed_actions, dim=-1)
 
 
 def _reset_recording_episode(
@@ -157,14 +167,14 @@ def _reset_recording_episode(
     policy: PolicyBase,
     *,
     disable_full_sim_buffer_reset: bool,
+    task_description: str,
 ) -> Any:
     base_env = env.unwrapped
     if not disable_full_sim_buffer_reset:
         base_env.sim.reset()
-    base_env.recorder_manager.reset()
     obs, _ = env.reset()
     policy.reset()
-    policy.set_task_description(base_env.get_language_instruction())
+    policy.set_task_description(task_description)
     return obs
 
 
@@ -185,12 +195,14 @@ def _is_demonstration_ended(policy: PolicyBase) -> bool:
 def collect_policy_demos(
     env: gym.Env,
     policy: PolicyBase,
+    recorder: SO101LeRobotRecorder,
     success_term: TerminationTermCfg,
     *,
     generation_num_trials: int,
     max_retries: int | None,
     num_success_steps: int,
     disable_full_sim_buffer_reset: bool,
+    task_description: str | None,
     is_running,
 ) -> tuple[int, int]:
     """Roll out ``policy`` until enough successes or the retry budget is exhausted.
@@ -203,19 +215,31 @@ def collect_policy_demos(
     import torch
 
     base_env = env.unwrapped
-    assert base_env.num_envs == 1, "generate_policy_demos currently requires --num_envs 1"
+    assert base_env.num_envs == 1, (
+        "generate_policy_demos currently requires --num_envs 1"
+    )
+    task_description = task_description or base_env.get_language_instruction()
+    if not task_description:
+        raise ValueError("A task description is required; pass --task_description")
 
     num_successful = 0
     num_failed = 0
     success_step_count = 0
 
     obs = _reset_recording_episode(
-        env, policy, disable_full_sim_buffer_reset=disable_full_sim_buffer_reset
+        env,
+        policy,
+        disable_full_sim_buffer_reset=disable_full_sim_buffer_reset,
+        task_description=task_description,
     )
 
     print(
         f"Collecting demos: target={generation_num_trials} successes"
-        + (f", max_retries={max_retries}" if max_retries is not None else ", max_retries=unlimited")
+        + (
+            f", max_retries={max_retries}"
+            if max_retries is not None
+            else ", max_retries=unlimited"
+        )
     )
 
     with torch.inference_mode():
@@ -227,15 +251,21 @@ def collect_policy_demos(
                 break
 
             actions = policy.get_action(env, obs)
+            recording_observation = recorder.snapshot_observation(obs)
             obs, _, terminated, truncated, _ = env.step(actions)
+            recorder.add_transition(
+                recording_observation,
+                _get_processed_actions(base_env),
+                task=task_description,
+            )
 
             if _is_success(base_env, success_term):
                 success_step_count += 1
                 if success_step_count >= num_success_steps:
-                    _export_successful_episode(base_env)
+                    recorder.save_episode()
                     num_successful += 1
                     print(
-                        f"Exported successful demo {num_successful}/{generation_num_trials} "
+                        f"Saved successful demo {num_successful}/{generation_num_trials} "
                         f"(failed so far: {num_failed})."
                     )
                     success_step_count = 0
@@ -245,6 +275,7 @@ def collect_policy_demos(
                         env,
                         policy,
                         disable_full_sim_buffer_reset=disable_full_sim_buffer_reset,
+                        task_description=task_description,
                     )
                     continue
             else:
@@ -253,6 +284,7 @@ def collect_policy_demos(
             # Timeout / other truncation or non-success termination → failed attempt.
             # Manager-based envs auto-reset on done; obs is already the next episode.
             if terminated.any() or truncated.any():
+                recorder.discard_episode()
                 num_failed += 1
                 env_ids = (terminated | truncated).nonzero().flatten()
                 policy.reset(env_ids=env_ids)
@@ -268,6 +300,7 @@ def collect_policy_demos(
             # waiting for episode timeout. If success is already holding, keep
             # stepping until num_success_steps exports above.
             if _is_demonstration_ended(policy) and success_step_count == 0:
+                recorder.discard_episode()
                 num_failed += 1
                 print(
                     f"Policy demonstration ended without success — failed episode "
@@ -279,6 +312,7 @@ def collect_policy_demos(
                     env,
                     policy,
                     disable_full_sim_buffer_reset=disable_full_sim_buffer_reset,
+                    task_description=task_description,
                 )
 
     return num_successful, num_failed
@@ -291,11 +325,10 @@ def main() -> None:
 
     args_parser = get_isaaclab_arena_cli_parser()
     _add_generation_arguments(args_parser)
-    args_cli, unknown = args_parser.parse_known_args()
+    args_cli, _ = args_parser.parse_known_args()
 
-    # Cameras must be enabled before Kit starts if the recorder needs them.
-    if "--enable_cameras" in unknown or getattr(args_cli, "enable_cameras", False):
-        args_cli.enable_cameras = True
+    # Cameras must be enabled before Kit starts for the LeRobot video features.
+    args_cli.enable_cameras = True
 
     with SimulationAppContext(args_cli) as sim_app:
         # Resolve policy class, then attach its typed CLI flags + env subparsers.
@@ -306,46 +339,70 @@ def main() -> None:
         args_parser = add_policy_cli_args(args_parser, policy_cls)
         args_cli, hydra_overrides = args_parser.parse_known_args()
         assert_hydra_overrides(hydra_overrides, args_parser)
-        # Full re-parse resets enable_cameras to its default; restore if cameras were requested.
-        if "--enable_cameras" in unknown:
-            args_cli.enable_cameras = True
+        # Full re-parse resets enable_cameras to its default.
+        args_cli.enable_cameras = True
 
         if args_cli.num_envs != 1:
-            raise ValueError(f"generate_policy_demos requires --num_envs 1, got {args_cli.num_envs}")
+            raise ValueError(
+                f"generate_policy_demos requires --num_envs 1, got {args_cli.num_envs}"
+            )
 
-        output_dir, output_file_name = _setup_output_paths(args_cli.output_file)
-
-        arena_builder = get_arena_builder_from_cli(args_cli, hydra_overrides=hydra_overrides)
+        arena_builder = get_arena_builder_from_cli(
+            args_cli, hydra_overrides=hydra_overrides
+        )
         env_name, env_cfg, env_kwargs = arena_builder.build_registered()
-        success_term = _configure_env_for_recording(env_cfg, args_cli, output_dir, output_file_name)
+        success_term = _configure_env_for_recording(env_cfg)
 
         import gymnasium as gym
-
-        from isaaclab_arena.utils.isaaclab_utils.simulation_app import reapply_viewer_cfg
+        from arena_so101.lerobot.recorder import SO101LeRobotRecorder
+        from isaaclab_arena.utils.isaaclab_utils.simulation_app import (
+            reapply_viewer_cfg,
+        )
 
         env = gym.make(env_name, cfg=env_cfg, **env_kwargs)
         reapply_viewer_cfg(env)
         policy = build_policy_from_cli(policy_cls, args_cli)
 
         try:
-            num_successful, num_failed = collect_policy_demos(
-                env,
-                policy,
-                success_term,
-                generation_num_trials=args_cli.generation_num_trials,
-                max_retries=args_cli.max_retries,
-                num_success_steps=args_cli.num_success_steps,
-                disable_full_sim_buffer_reset=args_cli.disable_full_sim_buffer_reset,
-                is_running=sim_app.is_running,
-            )
+            fps_float = 1.0 / env.unwrapped.step_dt
+            fps = round(fps_float)
+            if not math.isclose(fps_float, fps, rel_tol=0.0, abs_tol=1e-6):
+                raise ValueError(f"LeRobot requires an integer FPS, got {fps_float}")
+
+            with SO101LeRobotRecorder(
+                root=args_cli.output_dir,
+                repo_id=args_cli.dataset_repo_id,
+                fps=fps,
+                resume=args_cli.resume,
+                overwrite=args_cli.overwrite,
+                streaming_encoding=not args_cli.disable_streaming_encoding,
+            ) as recorder:
+                print(
+                    f"LeRobot dataset: {recorder.root} "
+                    f"(existing episodes: {recorder.num_episodes}, fps: {fps})"
+                )
+                num_successful, num_failed = collect_policy_demos(
+                    env,
+                    policy,
+                    recorder,
+                    success_term,
+                    generation_num_trials=args_cli.generation_num_trials,
+                    max_retries=args_cli.max_retries,
+                    num_success_steps=args_cli.num_success_steps,
+                    disable_full_sim_buffer_reset=args_cli.disable_full_sim_buffer_reset,
+                    task_description=args_cli.task_description,
+                    is_running=sim_app.is_running,
+                )
         finally:
             if policy.is_remote:
-                policy.shutdown_remote(kill_server=getattr(args_cli, "remote_kill_on_exit", False))
+                policy.shutdown_remote(
+                    kill_server=getattr(args_cli, "remote_kill_on_exit", False)
+                )
             env.close()
 
         print(
-            f"Done: exported {num_successful} successful demo(s), "
-            f"{num_failed} failed attempt(s) → {args_cli.output_file}"
+            f"Done: saved {num_successful} successful demo(s), "
+            f"{num_failed} failed attempt(s) → {args_cli.output_dir}"
         )
 
 

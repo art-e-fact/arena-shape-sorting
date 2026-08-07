@@ -9,6 +9,7 @@ description = "SO-101 embodiment and leader teleop for Isaac Lab Arena"
 requires-python = ">=3.10"
 dependencies = [
     "isaaclab_arena",
+    "lerobot[dataset,training]",
 ]
 
 [project.optional-dependencies]
@@ -22,4 +23,5 @@ arena_so101 = [
     "embodiments/data/*.usd",
     "embodiments/data/*.usda",
     "embodiments/data/curobo/**/*",
+    "lerobot/*",
 ]
