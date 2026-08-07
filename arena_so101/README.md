@@ -35,7 +35,12 @@ embodiment = asset_registry.get_asset_by_name("so101_abs_joint")(enable_cameras=
 USD joints: `Rotation`, `Pitch`, `Elbow`, `Wrist_Pitch`, `Wrist_Roll`, `Jaw`.
 The robot USD comes from the [Sim-to-Real-SO-101-Workshop](https://github.com/isaac-sim/Sim-to-Real-SO-101-Workshop).
 
-Wrist camera is a Python `TiledCameraCfg` on `Robot/gripper/gripper_cam` (enabled with `enable_cameras=True`).
+Wrist camera is a Python `CameraCfg` on `Robot/gripper/gripper_cam`
+(enabled with `enable_cameras=True`). Shape-sorting also enables a fixed
+env-frame `external_camera` (over-shoulder / table view) beside the wrist cam.
+Tune the external view by overriding `camera_config.external_camera.offset`
+(`pos` + `rot`); there is no prim look-at on `CameraCfg` — shape-sorting uses
+an eye/target helper to derive the quaternion.
 
 `so101_ik` is a 5-DOF arm: DLS tracks EE position and does best-effort orientation on the 6D pose command.
 
@@ -68,6 +73,31 @@ python -m arena_so101.generate_curobo_config \
 ```
 
 Add `--visualize` to inspect fitted spheres in Viser.
+
+## LeRobot recording
+
+`shape_sorting.generate_policy_demos` records successful scripted-policy
+rollouts directly as LeRobot v3. It stores six-joint state/action vectors and
+both the wrist and exterior RGB cameras. Failed attempts are discarded before
+they enter the dataset.
+
+```bash
+python -m shape_sorting.generate_policy_demos \
+  --policy_type shape_sorting.curobo_policy.CuroboPolicy \
+  --generation_num_trials 10 \
+  --output_dir ./datasets/curobo_shape_sorting \
+  --dataset_repo_id local/curobo_shape_sorting \
+  shape_sorting_test --embodiment so101_abs_joint
+```
+
+The output directory must not exist by default. Use `--resume` to append to a
+compatible dataset or `--overwrite` to recreate it. Camera rendering and
+streaming video encoding are enabled automatically; use
+`--disable_streaming_encoding` to encode from temporary PNGs instead.
+
+The YAML/JSON assets and `convert_hdf5_to_lerobot` module under
+`arena_so101.lerobot` are legacy support for existing HDF5/GR00T datasets.
+Direct LeRobot v3 recording does not use them.
 
 ## Teleop
 

@@ -1,0 +1,11 @@
+# Sim / MimicGen HDF5 column order for so101_abs_joint.
+# Must match arena_so101.mapping.SIM_JOINT_NAMES and vector length in the HDF5.
+joints:
+  Rotation: 0
+  Pitch: 1
+  Elbow: 2
+  Wrist_Pitch: 3
+  Wrist_Roll: 4
+  Jaw: 5
+
+total_joints: 6

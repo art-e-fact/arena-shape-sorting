@@ -9,3 +9,4 @@ __pycache__
 logs/*
 outputs/*
 *.hdf5
+datasets/*

@@ -6,14 +6,48 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
 from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
 
 if TYPE_CHECKING:
+    from isaaclab.sensors import CameraCfg
+
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
+
+
+def _camera_offset_look_at(
+    eye: tuple[float, float, float],
+    target: tuple[float, float, float],
+    *,
+    convention: Literal["opengl", "ros", "world"] = "ros",
+) -> CameraCfg.OffsetCfg:
+    """Build a ``CameraCfg.OffsetCfg`` that places the camera at ``eye`` looking at ``target``.
+
+    Both points are in the camera parent frame (for ``{ENV_REGEX_NS}/external_camera``
+    that is the env / world frame). ``CameraCfg`` has no prim look-at; only ``pos`` + ``rot``.
+    """
+    import torch
+    from isaaclab.sensors import CameraCfg
+    from isaaclab.utils.math import (
+        convert_camera_frame_orientation_convention,
+        create_rotation_matrix_from_view,
+        quat_from_matrix,
+    )
+
+    eyes = torch.tensor([eye], dtype=torch.float32)
+    targets = torch.tensor([target], dtype=torch.float32)
+    # world → view (OpenGL: forward -Z). Convert into the requested camera convention.
+    rot_m = create_rotation_matrix_from_view(eyes, targets, up_axis="Z")
+    quat_opengl = quat_from_matrix(rot_m)[0]
+    quat = convert_camera_frame_orientation_convention(quat_opengl.unsqueeze(0), origin="opengl", target=convention)[0]
+    return CameraCfg.OffsetCfg(
+        pos=eye,
+        rot=tuple(float(x) for x in quat.tolist()),
+        convention=convention,
+    )
 
 
 @dataclass(frozen=True)
@@ -67,7 +101,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
     def build(self, cfg: ShapeSortingEnvironmentCfg) -> IsaacLabArenaEnvironment:
         """Build the environment from its typed configuration."""
         from isaaclab.envs.common import ViewerCfg
-        from isaaclab.managers import TerminationTermCfg
+        from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
 
         from isaaclab_arena.assets.object_base import ObjectType
         from isaaclab_arena.assets.object_reference import ObjectReference
@@ -78,6 +112,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.utils.pose import Pose
 
         from shape_sorting.debug_key_reset import debug_key_reset_termination
+        from shape_sorting.predicates import objects_centers_inside_aabb
         from shape_sorting.shape_asset import SortingBox, make_shape_sorting_layout
 
         # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
@@ -106,8 +141,6 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             edge_chamfer=cfg.edge_chamfer,
             hole_chamfer=cfg.hole_chamfer,
         )
-        pieces = layout.pieces
-        box = layout.box
 
         # Describe spatial relationships.
         table_reference = ObjectReference(
@@ -154,6 +187,15 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
                     rotation_xyzw=embodiment.scene_config.robot.init_state.rot,
                 )
             )
+            # Over-shoulder / elevated third-person cam looking at the sorting table.
+            # CameraCfg has no look-at-prim API — set eye + target in env frame and
+            # derive the offset quaternion (see ``_camera_offset_look_at``).
+            if cfg.enable_cameras and embodiment.camera_config is not None:
+                embodiment.camera_config.external_camera.offset = _camera_offset_look_at(
+                    eye=(1.2, -0.55, 0.9),
+                    target=(0.45, 0.0, 0.05),
+                    convention="ros",
+                )
 
         # Droid does not wire concatenate_observation_terms into its obs cfg yet.
         embodiment.observation_config.policy.concatenate_terms = True
@@ -178,14 +220,24 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             ]
         )
 
-        # Place-all task: every piece must contact the shared sorting box.
+        # Place-all task: success when every piece center is inside the box cavity.
         task = SortMultiObjectTask(
-            pick_up_object_list=pieces,
-            destination_location_list=[box] * len(pieces),
+            pick_up_object_list=layout.pieces,
+            destination_location_list=[layout.box] * len(layout.pieces),
             background_scene=background,
-            episode_length_s=120.0,
+            episode_length_s=40.0,
         )
-        task.termination_cfg.success.params["force_threshold"] = 0.1
+        cavity = layout.box.get_inner_bounding_box()
+        task.termination_cfg.success = TerminationTermCfg(
+            func=objects_centers_inside_aabb,
+            params={
+                "object_cfg_list": [SceneEntityCfg(piece.name) for piece in layout.pieces],
+                "container_cfg": SceneEntityCfg(layout.box.name),
+                "aabb_min": tuple(cavity.min_point[0].tolist()),
+                "aabb_max": tuple(cavity.max_point[0].tolist()),
+                "velocity_threshold": 0.1,
+            },
+        )
 
         # Privileged lid-hole frames (box-local offsets) for policies / debug viz.
         from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg
@@ -193,7 +245,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.utils.configclass import combine_configclass_instances, make_configclass
 
         # TODO: debug_vis should be a parameter in the environment cfg.
-        hole_frames_cfg = box.get_hole_frames_cfg(debug_vis=False)
+        hole_frames_cfg = layout.box.get_hole_frames_cfg(debug_vis=False)
         HoleFramesSceneCfg = make_configclass(
             "HoleFramesSceneCfg",
             [(SortingBox.HOLE_FRAMES_SENSOR_NAME, FrameTransformerCfg, hole_frames_cfg)],
@@ -207,7 +259,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         # Privileged layout metadata + viewer / debug hooks for the manager env cfg.
         def _configure_env_cfg(env_cfg):
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
-            env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in pieces]
+            env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in layout.pieces]
             if cfg.debug_key_reset:
                 # Truncation (not success): ends the episode so policy_runner resets and continues.
                 env_cfg.terminations.debug_key_reset = TerminationTermCfg(

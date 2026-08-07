@@ -7,8 +7,8 @@
                 double radius = 5
             }
             dictionary Perspective = {
-                double3 position = (0.4771842444389566, 0.07358962105691348, 0.30121090085077357)
-                double3 target = (-0.0000864616513225891, -0.2816933184180037, 0.15363354593560902)
+                double3 position = (0.40362185261991146, -0.10874293649651347, 0.29583940876009873)
+                double3 target = (0.24696729475686266, 0.5826402458535663, 0.20277611204815887)
             }
             dictionary Right = {
                 double3 position = (0, -5, 0)
@@ -29,7 +29,13 @@
         }
         int refinementOverrideImplVersion = 0
         dictionary renderSettings = {
-            int "rtx:wireframe:mode" = 1
+            double "rtx:directLighting:sampledLighting:maxRayUnexposedIntensity" = 6399.9990234375
+            double "rtx:indirectDiffuse:maxRayUnexposedIntensity" = 6399.9990234375
+            double "rtx:pathtracing:fireflyFilter:maxPerEmissiveUnexposedIntensity" = 3199.99951171875
+            double "rtx:pathtracing:fireflyFilter:maxUnexposedIntensityPerSample" = 3199.99951171875
+            double "rtx:pathtracing:fireflyFilter:maxUnexposedIntensityPerSampleDiffuse" = 3199.99951171875
+            double "rtx:raytracing:inscattering:maxRTSampleUnexposedIntensity" = 204799.96875
+            double "rtx:translucency:maxRayUnexposedIntensity" = 19199.998046875
         }
     }
     defaultPrim = "World"
@@ -52,13 +58,13 @@ def Xform "World"
 
             def Sphere "curobo_collider_sphere"
             {
-                float3[] extent = [(-0.005, -0.005, -0.005), (0.005, 0.005, 0.005)]
-                double radius = 0.005
+                float3[] extent = [(-0.004, -0.004, -0.004), (0.004, 0.004, 0.004)]
+                double radius = 0.004
                 custom bool refinementEnableOverride = 1
                 custom int refinementLevel = 2
                 quatd xformOp:orient = (1, 0, 0, 0)
                 double3 xformOp:scale = (1, 1, 1)
-                double3 xformOp:translate = (-0.00959693144541568, -0.07746047580722804, 0.01911606073346009)
+                double3 xformOp:translate = (-0.009143070959983346, -0.07709503554006031, 0.019116056965293036)
                 uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
             }
 
@@ -79,13 +85,13 @@ def Xform "World"
         {
             def Sphere "curobo_collider_sphere"
             {
-                float3[] extent = [(-0.004, -0.004, -0.004), (0.004, 0.004, 0.004)]
-                double radius = 0.004
+                float3[] extent = [(-0.003, -0.003, -0.003), (0.003, 0.003, 0.003)]
+                double radius = 0.003
                 custom bool refinementEnableOverride = 1
                 custom int refinementLevel = 2
                 quatd xformOp:orient = (0.7071046316882184, -0.0000028238370219924028, 0.7071089306555096, -0.000004931191485868512)
                 double3 xformOp:scale = (1, 1, 1)
-                double3 xformOp:translate = (-0.011601776404440378, -0.00042682628482566126, -0.09984957835710845)
+                double3 xformOp:translate = (-0.010694298907475641, -0.000210226007589992, -0.10167810375399866)
                 uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
             }
 
@@ -98,6 +104,30 @@ def Xform "World"
                 quatd xformOp:orient = (0.7071046316882184, -0.0000028238370219924028, 0.7071089306555096, -0.000004931191485868512)
                 double3 xformOp:scale = (1, 1, 1)
                 double3 xformOp:translate = (-0.006200799193924966, 0.060597376495617764, -0.041267083242819136)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+            }
+
+            def Sphere "curobo_collider_sphere_02"
+            {
+                float3[] extent = [(-0.003, -0.003, -0.003), (0.003, 0.003, 0.003)]
+                double radius = 0.003
+                custom bool refinementEnableOverride = 1
+                custom int refinementLevel = 2
+                quatd xformOp:orient = (0.7071046316882184, -0.0000028238370219924028, 0.7071089306555096, -0.000004931191485868512)
+                double3 xformOp:scale = (1, 1, 1)
+                double3 xformOp:translate = (-0.010694270862693978, 0.0019471474941015303, -0.0981227785521504)
+                uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
+            }
+
+            def Sphere "curobo_collider_sphere_03"
+            {
+                float3[] extent = [(-0.003, -0.003, -0.003), (0.003, 0.003, 0.003)]
+                double radius = 0.003
+                custom bool refinementEnableOverride = 1
+                custom int refinementLevel = 2
+                quatd xformOp:orient = (0.7071046316882184, -0.0000028238370219924028, 0.7071089306555096, -0.000004931191485868512)
+                double3 xformOp:scale = (1, 1, 1)
+                double3 xformOp:translate = (-0.010694284211842153, -0.0025321157959423655, -0.09812272942682149)
                 uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient", "xformOp:scale"]
             }
         }
@@ -165,19 +195,26 @@ def "Render" (
                 bool omni:rtx:post:registeredCompositing:invertToneMap = 1
                 bool omni:rtx:pt:adaptiveSampling:filterError = 0
                 uint omni:rtx:pt:adaptiveSampling:fixedSppIterations = 2
+                float omni:rtx:pt:fireflyFilter:maxPerEmissiveUnexposedIntensity = 3199.9995
+                float omni:rtx:pt:fireflyFilter:maxUnexposedIntensityPerSample = 3199.9995
+                float omni:rtx:pt:fireflyFilter:maxUnexposedIntensityPerSampleDiffuse = 3199.9995
                 uint omni:rtx:pt:maxSamplesPerLaunch = 2073600
                 uint omni:rtx:pt:mgpu:maxPixelsPerRegionExponent = 12
                 bool omni:rtx:reflections:denoiser:enabled = 0
                 token omni:rtx:rendermode = "RealTimePathTracing"
                 color3f omni:rtx:rt:ambientLight:color = (0.1, 0.1, 0.1)
                 bool omni:rtx:rt:demoire = 0
+                float omni:rtx:rt:directLighting:maxRayUnexposedIntensity = 6399.999
+                float omni:rtx:rt:indirectdiffuse:maxRayUnexposedIntensity = 6399.999
+                float omni:rtx:rt:inscattering:maxRTSampleUnexposedIntensity = 204799.97
                 bool omni:rtx:rt:lightcache:spatialCache:dontResolveConflicts = 1
+                float omni:rtx:rt:refractions:maxRayUnexposedIntensity = 19199.998
                 int omni:rtx:rt:sss:samples = 1
                 uint omni:rtx:rtpt:maxVolumeBounces = 15
                 float omni:rtx:rtpt:modulatingRoughnessThreshold = 0.08
                 bool omni:rtx:scene:hydra:materialSyncLoads = 1
                 bool omni:rtx:scene:hydra:mdlMaterialWarmup = 1
-                token omni:rtx:wireframe:mode = "shaded"
+                token omni:rtx:wireframe:mode
                 rel orderedVars = </Render/Vars/LdrColor>
                 custom bool overrideClipRange = 0
                 uniform int2 resolution = (1280, 720)
@@ -227,10 +264,10 @@ over "OmniverseKit_Persp" (
     float exposure:time = 0.02
     float focalLength = 18.147562
     float focusDistance = 400
-    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -0.613019061414576)
-    float3 xformOp:rotateXYZ = (76.06986, -3.4986103e-14, 126.6642)
+    custom uniform vector3d omni:kit:centerOfInterest = (0, 0, -0.7149910017130884)
+    float3 xformOp:rotateXYZ = (82.52116, -9.621178e-14, 12.766595)
     float3 xformOp:scale = (1, 1, 1)
-    double3 xformOp:translate = (0.4771842444389566, 0.07358962105691348, 0.30121090085077357)
+    double3 xformOp:translate = (0.40362185261991146, -0.10874293649651347, 0.29583940876009873)
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"]
 }
 
