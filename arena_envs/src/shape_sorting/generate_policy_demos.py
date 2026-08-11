@@ -22,6 +22,7 @@ Example::
       --policy_type shape_sorting.curobo_policy.CuroboPolicy \\
       --generation_num_trials 10 \\
       --max_retries 40 \\
+      --action_noise 0.01 \\
       --output_dir ./datasets/curobo_shape_sorting \\
       --dataset_repo_id local/curobo_shape_sorting \\
       --debug_viser \\
@@ -130,6 +131,16 @@ def _add_generation_arguments(parser) -> None:
         default=False,
         help="Skip env.sim.reset() before each new recording episode.",
     )
+    parser.add_argument(
+        "--action_noise",
+        type=float,
+        default=0.0,
+        help=(
+            "Std-dev of i.i.d. Gaussian noise added to every action dim (including jaw) "
+            "before env.step, Mimic-style. Recorded actions are the noisy ones. "
+            "0 disables noise. Typical Mimic scales are ~0.003–0.03 depending on action space."
+        ),
+    )
 
 
 def _configure_env_for_recording(env_cfg: Any) -> Any:
@@ -160,6 +171,19 @@ def _get_processed_actions(base_env: gym.Env):
     ]
     assert processed_actions, "The environment has no active action terms"
     return torch.cat(processed_actions, dim=-1)
+
+
+def _apply_action_noise(actions, action_noise: float):
+    """Add i.i.d. Gaussian noise to actions (Mimic-style execution noise).
+
+    Noise is applied to all action dimensions, including the jaw for continuous
+    abs-joint control. Returns ``actions`` unchanged when ``action_noise <= 0``.
+    """
+    import torch
+
+    if action_noise <= 0.0:
+        return actions
+    return actions + action_noise * torch.randn_like(actions)
 
 
 def _reset_recording_episode(
@@ -203,11 +227,16 @@ def collect_policy_demos(
     num_success_steps: int,
     disable_full_sim_buffer_reset: bool,
     task_description: str | None,
+    action_noise: float,
     is_running,
 ) -> tuple[int, int]:
     """Roll out ``policy`` until enough successes or the retry budget is exhausted.
 
     ``env`` should be the gym-wrapped env from ``gym.make`` / ``make_registered``.
+
+    When ``action_noise > 0``, i.i.d. Gaussian noise is added to policy actions before
+    ``env.step`` (including jaw). Recorded actions come from the env's processed
+    (noisy) targets, matching Mimic datagen.
 
     Returns:
         (num_successful, num_failed)
@@ -218,6 +247,8 @@ def collect_policy_demos(
     assert base_env.num_envs == 1, (
         "generate_policy_demos currently requires --num_envs 1"
     )
+    if action_noise < 0.0:
+        raise ValueError(f"--action_noise must be >= 0, got {action_noise}")
     task_description = task_description or base_env.get_language_instruction()
     if not task_description:
         raise ValueError("A task description is required; pass --task_description")
@@ -240,6 +271,7 @@ def collect_policy_demos(
             if max_retries is not None
             else ", max_retries=unlimited"
         )
+        + (f", action_noise={action_noise}" if action_noise > 0.0 else ", action_noise=off")
     )
 
     with torch.inference_mode():
@@ -250,7 +282,7 @@ def collect_policy_demos(
                 print(f"Reached max_retries={max_retries} failed episodes; stopping.")
                 break
 
-            actions = policy.get_action(env, obs)
+            actions = _apply_action_noise(policy.get_action(env, obs), action_noise)
             recording_observation = recorder.snapshot_observation(obs)
             obs, _, terminated, truncated, _ = env.step(actions)
             recorder.add_transition(
@@ -391,6 +423,7 @@ def main() -> None:
                     num_success_steps=args_cli.num_success_steps,
                     disable_full_sim_buffer_reset=args_cli.disable_full_sim_buffer_reset,
                     task_description=args_cli.task_description,
+                    action_noise=args_cli.action_noise,
                     is_running=sim_app.is_running,
                 )
         finally:
