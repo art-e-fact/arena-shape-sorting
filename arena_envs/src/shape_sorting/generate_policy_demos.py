@@ -28,6 +28,15 @@ Example::
       --debug_viser \\
       shape_sorting_test \\
       --embodiment so101_abs_joint
+
+Upload to the Hugging Face Hub after recording (requires ``huggingface-cli login``)::
+
+    python -m shape_sorting.generate_policy_demos \\
+      ... \\
+      --dataset_repo_id ${HF_USER}/curobo_shape_sorting \\
+      --push_to_hub \\
+      --private \\
+      shape_sorting_test --embodiment so101_abs_joint
 """
 
 from __future__ import annotations
@@ -95,7 +104,10 @@ def _add_generation_arguments(parser) -> None:
         "--dataset_repo_id",
         type=str,
         default="local/curobo_shape_sorting",
-        help="LeRobot dataset identifier stored in metadata.",
+        help=(
+            "LeRobot dataset identifier stored in metadata "
+            "(use '{hf_username}/{dataset_name}' when --push_to_hub is set)."
+        ),
     )
     output_mode = parser.add_mutually_exclusive_group()
     output_mode.add_argument(
@@ -140,6 +152,25 @@ def _add_generation_arguments(parser) -> None:
             "before env.step, Mimic-style. Recorded actions are the noisy ones. "
             "0 disables noise. Typical Mimic scales are ~0.003–0.03 depending on action space."
         ),
+    )
+    parser.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help=(
+            "Upload the recorded LeRobot dataset to the Hugging Face Hub after "
+            "recording (calls LeRobotDataset.push_to_hub)."
+        ),
+    )
+    parser.add_argument(
+        "--private",
+        action="store_true",
+        help="Create a private Hub repository when --push_to_hub is set.",
+    )
+    parser.add_argument(
+        "--dataset_tags",
+        nargs="*",
+        default=None,
+        help="Optional Hub tags for the dataset card when --push_to_hub is set.",
     )
 
 
@@ -395,6 +426,9 @@ def main() -> None:
         reapply_viewer_cfg(env)
         policy = build_policy_from_cli(policy_cls, args_cli)
 
+        dataset = None
+        num_successful = 0
+        num_failed = 0
         try:
             fps_float = 1.0 / env.unwrapped.step_dt
             fps = round(fps_float)
@@ -409,6 +443,8 @@ def main() -> None:
                 overwrite=args_cli.overwrite,
                 streaming_encoding=not args_cli.disable_streaming_encoding,
             ) as recorder:
+                # Keep a handle for Hub upload after the recorder finalizes on exit.
+                dataset = recorder.dataset
                 print(
                     f"LeRobot dataset: {recorder.root} "
                     f"(existing episodes: {recorder.num_episodes}, fps: {fps})"
@@ -437,6 +473,17 @@ def main() -> None:
             f"Done: saved {num_successful} successful demo(s), "
             f"{num_failed} failed attempt(s) → {args_cli.output_dir}"
         )
+
+        if args_cli.push_to_hub:
+            if dataset is not None and dataset.num_episodes > 0:
+                print(f"Pushing dataset to Hub: {dataset.repo_id}")
+                dataset.push_to_hub(
+                    tags=args_cli.dataset_tags,
+                    private=True if args_cli.private else None,
+                )
+                print(f"Pushed to https://huggingface.co/datasets/{dataset.repo_id}")
+            else:
+                print("No episodes saved — skipping push to hub")
 
 
 if __name__ == "__main__":
