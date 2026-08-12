@@ -40,25 +40,15 @@ jobs:
         - name: arena_policy_evaluation_test_newton
           metrics: metrics.json
           run: |
-            rm -rf /tmp/outputs && mkdir -p /tmp/outputs && ./docker/run_docker.sh 'cd /workspaces/arena-shape-sorting && /isaac-sim/python.sh arena_envs/src/shape_sorting/run_policy.py \
-              --viz kit \
-              --presets newton \
-              --policy_type rsl_rl \
-              --num_steps 800 \
-              --output_base_dir /tmp/outputs \
-              --record_viewport_video \
-              --checkpoint_path /workspaces/arena-shape-sorting/logs/rsl_rl/dexsuite_kuka_allegro/2026-07-14_11-49-36/model_14999.pt \
-              dexsuite_lift'
+            PYTHONPATH=. lerobot-eval \
+              --policy.path=Artefacts/act-shape-sorting-so101 \
+              --policy.device=cuda \
+              --output_dir $ARTEFACTS_SCENARIO_UPLOAD_DIR \
+              --env.discover_packages_path=envhub \
+              --env.type=shape_sorting_arena \
+              --rename_map='{"observation.images.camera_ego_rgb": "observation.images.ego_view", "observation.images.external_camera_rgb": "observation.images.exterior_image"}' \
+              --eval.batch_size=1 \
+              --eval.n_episodes=1 \
+              2>&1
         
-        - name: arena_policy_evaluation_test_physx
-          metrics: metrics.json
-          run: |
-            rm -rf /tmp/outputs && mkdir -p /tmp/outputs && ./docker/run_docker.sh 'cd /workspaces/arena-shape-sorting && /isaac-sim/python.sh arena_envs/src/shape_sorting/run_policy.py \
-              --viz kit \
-              --presets physx \
-              --policy_type rsl_rl \
-              --num_steps 800 \
-              --output_base_dir /tmp/outputs \
-              --record_viewport_video \
-              --checkpoint_path /workspaces/arena-shape-sorting/logs/rsl_rl/dexsuite_kuka_allegro/2026-07-14_11-49-36/model_14999.pt \
-              dexsuite_lift'
+
