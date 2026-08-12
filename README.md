@@ -18,9 +18,9 @@ Contents:
     - [Smoke test](#smoke-test)
     - [cuRobo SO-101 reach smoke test](#curobo-so-101-reach-smoke-test)
     - [Environment options](#environment-options)
- - [Teleoperation data collection](#teleoperation-data-collection)
-    - [Record demos](#record-demos)
-    - [Other tested teleop options for the SO-101 embodiment](#other-tested-teleop-options-for-the-so-101-embodiment)
+ - [Building the dataset](#building-the-dataset)
+    - [Scripted synthetic dataset generation](#scripted-synthetic-dataset-generation)
+    - [Teleoperation data collection](#teleoperation-data-collection)
  - [Training and evaluation with LeRobot](#training-and-evaluation-with-lerobot)
     - [Train an ACT policy on the shape-sorting dataset](#train-an-act-policy-on-the-shape-sorting-dataset)
     - [Evaluate with the LeRobot CLI](#evaluate-with-the-lerobot-cli)
@@ -126,7 +126,32 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
 
-## Teleoperation data collection
+## Building the dataset
+
+### Scripted synthetic dataset generation
+
+This script will use a cuRobo based scripted policy to execute the shape-sorting task and record the demos in LeRobot dataset format.
+
+```bash
+python -m shape_sorting.generate_policy_demos \
+  --viz kit \
+  --task_description "Insert the shapes into the sorting box." \
+  --policy_type shape_sorting.curobo_policy.CuroboPolicy \
+  --generation_num_trials 50 \
+  --max_retries 100 \
+  --output_dir ./datasets/curobo_shape_sorting \
+  --dataset_repo_id Artefacts/shape-sorting-so101 \
+  --push_to_hub \
+  --num_success_steps 12 \
+  --action_noise 0.01 \
+  shape_sorting_test \
+  --embodiment so101_abs_joint \
+  --debug_key_reset
+```
+
+Run `python -m shape_sorting.generate_policy_demos --help` for more options.
+
+### Teleoperation data collection
 
 https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
 
