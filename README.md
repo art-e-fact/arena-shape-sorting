@@ -1,14 +1,30 @@
-:construction: Work in progress...
-
 # IsaacLab-Arena shape-sorting environment and SO-101 embodiment
 
+Example workspace for solving a shape-sorting task with an SO-101 arm in a procedurally generated environment.
 
+Main features:
+ - Procedurally generated environment
+ - SO-101 arm embodiment
+ - Scripted synthetic dataset generation for imitation learning
+ - Teleoperation and data collection
+ - Training and evaluation with LeRobot
 
-https://github.com/user-attachments/assets/968bfb1a-6e5e-4aad-8be3-4ee7267268d3
-
-
-
-The repository contains a shape-sorting game environment with procedurally generated shape pieces and a sorting box and an SO-101 embodiment implementation.
+Contents:
+ - [Setup workspace](#setup-workspace)
+    - [Clone repo](#clone-repo)
+    - [With Docker](#with-docker)
+    - [With Python venv (uv)](#with-python-venv)
+ - [Run the environment](#run-the-environment)
+    - [Smoke test](#smoke-test)
+    - [cuRobo SO-101 reach smoke test](#curobo-so-101-reach-smoke-test)
+    - [Environment options](#environment-options)
+ - [Teleoperation data collection](#teleoperation-data-collection)
+    - [Record demos](#record-demos)
+    - [Other tested teleop options for the SO-101 embodiment](#other-tested-teleop-options-for-the-so-101-embodiment)
+ - [Training and evaluation with LeRobot](#training-and-evaluation-with-lerobot)
+    - [Train an ACT policy on the shape-sorting dataset](#train-an-act-policy-on-the-shape-sorting-dataset)
+    - [Evaluate with the LeRobot CLI](#evaluate-with-the-lerobot-cli)
+    - [Run the evaluation with Artefacts](#run-the-evaluation-with-artefacts)
 
 ## Set up workspace
 
@@ -30,7 +46,7 @@ Build the container and start an interactive shell:
 ./docker/run_docker.sh
 ```
 
-### With Python venv
+### With Python venv (uv)
 
 Uses Arena's [native uv setup](https://isaac-sim.github.io/IsaacLab-Arena/release/0.3.0-prerelease/pages/quickstart/installation.html).
 
@@ -112,10 +128,7 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 
 ## Teleoperation data collection
 
-
-
 https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
-
 
 
 ```bash
@@ -130,6 +143,8 @@ python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/recor
   --embodiment so101_ik \
   --teleop_device keyboard
 ```
+
+> TODO: Add instructions for recording demos in LeRobot dataset format.
 
 ### Other tested teleop options for the SO-101 embodiment
 
@@ -156,33 +171,50 @@ Teleop with the SO-101 leader arm:
   --embodiment so101_abs_joint \
   --teleop_device so101_leader \
   --leader_port /dev/ttyACM0
+``` 
+
+
+## Training and evaluation with LeRobot
+
+You can learn more about LeRobot in the [general docs](https://huggingface.co/docs/lerobot/en/index) and [CLI docs](https://huggingface-lerobot.mintlify.app/).
+
+
+Train an ACT policy on the shape-sorting dataset:
+```bash
+lerobot-train \
+  --dataset.repo_id=Artefacts/shape-sorting-so101 \
+  --policy.type=act \
+  --output_dir=outputs/train/act_shape-sorting-so101 \
+  --job_name=act-shape-sorting-so101 \
+  --policy.device=cuda \
+  --wandb.enable=true \
+  --job.target=a10g-small \
+  --policy.repo_id=Artefacts/act-shape-sorting-so101
 ```
 
-### Experimental: Segmented recording
+For more info on training with LeRobot, see the [LeRobot documentation](https://huggingface.co/docs/lerobot/main/en/il_robots#train-a-policy).
 
-Executing smooth, error-free demonstrations can be challenging. This script records segment-by-segment.
 
-Features:
- - Undo parts of the demo
- - Replace teleoperated motion with a smooth transition from the start to the end position
 
-The CLI will guide you through the recording process. Optional `--smooth_steps N` controls how many steps the smooth transition interpolates (default 30).
+Evaluate with the LeRobot CLI
+```bash
+PYTHONPATH=. lerobot-eval \
+  --policy.path=Artefacts/act-shape-sorting-so101 \
+  --policy.device=cuda \
+  --output_dir ./outputs/eval/act_shape-sorting-so101 \
+  --env.discover_packages_path=envhub \
+  --env.type=shape_sorting_arena \
+  --env.visualizer=kit \
+  --rename_map='{"observation.images.camera_ego_rgb": "observation.images.ego_view", "observation.images.external_camera_rgb": "observation.images.exterior_image"}' \
+  --eval.batch_size=1 \
+  --eval.n_episodes=1
+```
+
+### Run the evaluation with Artefacts
+
+Follow these steps to set up your Artefacts project. For more details, refer to the [documentation](https://docs.artefacts.com/getting-started/).
 
 ```bash
-python -m shape_sorting.run_record_demos_segmented \
-  --viz kit \
-  --device cpu \
-  --dataset_file ./so101_shape_sorting.hdf5 \
-  --num_demos 10 \
-  --num_success_steps 2 \
-  --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \
-  shape_sorting_test \
-  --embodiment so101_ik \
-  --teleop_device keyboard
+artefacts run eval
 ```
-
-## Next steps
-
- - [ ] Publish training dataset
- - [ ] Publish control policy
- - [ ] Add evaluation tests
+The evaluation videos and metrics will show up on your Artefacts dashboard.
