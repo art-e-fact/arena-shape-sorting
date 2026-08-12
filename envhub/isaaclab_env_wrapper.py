@@ -22,13 +22,30 @@ logger = logging.getLogger(__name__)
 
 
 def close_simulation(env, simulation_app) -> None:
-    """Close the Isaac Lab env and the simulation app, ignoring teardown errors."""
+    """Close the Isaac Lab env and the simulation app, ignoring teardown errors.
+
+    Prefer this for failure paths where the process is about to abort anyway.
+    For normal LeRobot eval shutdown, :meth:`IsaacLabEnvWrapper.close` only closes
+    the env and defers ``app.close()`` to atexit — Kit's ``app.close()`` can
+    hard-exit the process and skip writing ``eval_info.json``.
+    """
     with suppress(Exception):
         if env is not None:
             env.close()
+    _close_simulation_app(simulation_app)
+
+
+def _close_simulation_app(simulation_app) -> None:
+    """Shut down Kit. May hard-exit the process; flush stdio first."""
+    if simulation_app is None:
+        return
+    # Kit's app.close() can terminate with exit code 0 before Python unwinds.
+    import sys
+
+    sys.stdout.flush()
+    sys.stderr.flush()
     with suppress(Exception):
-        if simulation_app is not None:
-            simulation_app.app.close()
+        simulation_app.app.close()
 
 
 class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
@@ -60,7 +77,9 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
             "render_fps": round(1.0 / env.unwrapped.step_dt),
         }
 
-        atexit.register(self.close)
+        # close() runs from LeRobot's close_envs *before* eval_info.json is written.
+        # Defer Kit shutdown to atexit so that write can complete.
+        atexit.register(self._atexit_close)
 
     @property
     def unwrapped(self) -> IsaacLabEnvWrapper:
@@ -136,12 +155,26 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
         return frame[0] if frame.ndim == 4 else frame
 
     def close(self, **kwargs) -> None:
-        """Close the environment and shut down the simulation app (once)."""
+        """Close the Isaac Lab env only (once).
+
+        Does not call Kit ``app.close()`` here: LeRobot's ``lerobot-eval`` closes
+        envs *before* writing ``eval_info.json``, and Kit can hard-exit on
+        ``app.close()``. The app is shut down from :meth:`_atexit_close` instead.
+        """
         if self._closed:
             return
         self._closed = True
         logger.info("Closing Isaac Lab Arena environment")
-        close_simulation(self._env, self._simulation_app)
+        with suppress(Exception):
+            if self._env is not None:
+                self._env.close()
+
+    def _atexit_close(self) -> None:
+        """Final teardown: env (if still open) then Kit app."""
+        self.close()
+        app = self._simulation_app
+        self._simulation_app = None
+        _close_simulation_app(app)
 
     def __enter__(self) -> IsaacLabEnvWrapper:
         return self

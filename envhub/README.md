@@ -33,6 +33,9 @@ PYTHONPATH=. lerobot-eval \
 (`camera_ego_rgb`), while the policy was trained on the dataset's names (`ego_view`).
 Drop `--env.visualizer=kit` to run headless.
 
+Metrics land in `--output_dir/eval_info.json` (LeRobot writes this after closing envs).
+Our wrapper defers Kit's `app.close()` to process exit so that write is not skipped.
+
 Useful overrides:
 
 - `--eval.batch_size=N` — N sub-environments batched inside the one simulation. Isaac Lab
