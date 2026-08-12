@@ -42,6 +42,9 @@ Upload to the Hugging Face Hub after recording (requires ``huggingface-cli login
 from __future__ import annotations
 
 import math
+import signal
+import threading
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
@@ -62,6 +65,28 @@ if TYPE_CHECKING:
     from arena_so101.lerobot.recorder import SO101LeRobotRecorder
     from isaaclab.managers import TerminationTermCfg
     from isaaclab_arena.policy.policy_base import PolicyBase
+
+# Soft stop for SIGINT/SIGTERM: finish the current step/save, then finalize.
+# A hard KeyboardInterrupt mid-save_episode can leave a hole in the dataset.
+_STOP = threading.Event()
+
+
+def _install_soft_stop_handlers() -> None:
+    """Convert first Ctrl+C / SIGTERM into a graceful stop; second forces default."""
+
+    def _handler(signum: int, _frame) -> None:
+        if _STOP.is_set():
+            signal.signal(signum, signal.SIG_DFL)
+            signal.raise_signal(signum)
+            return
+        print(
+            f"\nReceived signal {signum}; stopping after the current step "
+            "and finalizing the dataset (press Ctrl+C again to force-quit)."
+        )
+        _STOP.set()
+
+    signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
 
 
 def _register_shape_sorting_environment() -> None:
@@ -259,7 +284,7 @@ def collect_policy_demos(
     disable_full_sim_buffer_reset: bool,
     task_description: str | None,
     action_noise: float,
-    is_running,
+    should_continue: Callable[[], bool],
 ) -> tuple[int, int]:
     """Roll out ``policy`` until enough successes or the retry budget is exhausted.
 
@@ -268,6 +293,8 @@ def collect_policy_demos(
     When ``action_noise > 0``, i.i.d. Gaussian noise is added to policy actions before
     ``env.step`` (including jaw). Recorded actions come from the env's processed
     (noisy) targets, matching Mimic datagen.
+
+    ``should_continue`` is checked between steps (sim still running and no soft-stop).
 
     Returns:
         (num_successful, num_failed)
@@ -306,7 +333,7 @@ def collect_policy_demos(
     )
 
     with torch.inference_mode():
-        while is_running():
+        while should_continue():
             if num_successful >= generation_num_trials:
                 break
             if max_retries is not None and num_failed >= max_retries:
@@ -325,6 +352,7 @@ def collect_policy_demos(
             if _is_success(base_env, success_term):
                 success_step_count += 1
                 if success_step_count >= num_success_steps:
+                    # Do not check soft-stop here: let save_episode finish atomically.
                     recorder.save_episode()
                     num_successful += 1
                     print(
@@ -332,7 +360,7 @@ def collect_policy_demos(
                         f"(failed so far: {num_failed})."
                     )
                     success_step_count = 0
-                    if num_successful >= generation_num_trials:
+                    if num_successful >= generation_num_trials or not should_continue():
                         break
                     obs = _reset_recording_episode(
                         env,
@@ -371,12 +399,17 @@ def collect_policy_demos(
                     + (f"/{max_retries}" if max_retries is not None else "")
                     + f" (successes: {num_successful}/{generation_num_trials})."
                 )
+                if not should_continue():
+                    break
                 obs = _reset_recording_episode(
                     env,
                     policy,
                     disable_full_sim_buffer_reset=disable_full_sim_buffer_reset,
                     task_description=task_description,
                 )
+
+    if _STOP.is_set():
+        print("Soft-stop requested; discarding any in-progress episode and finalizing.")
 
     return num_successful, num_failed
 
@@ -392,6 +425,7 @@ def main() -> None:
 
     # Cameras must be enabled before Kit starts for the LeRobot video features.
     args_cli.enable_cameras = True
+    _install_soft_stop_handlers()
 
     with SimulationAppContext(args_cli) as sim_app:
         # Resolve policy class, then attach its typed CLI flags + env subparsers.
@@ -429,40 +463,47 @@ def main() -> None:
         dataset = None
         num_successful = 0
         num_failed = 0
+        # Finalize the dataset *before* SimulationAppContext.__exit__: on
+        # exceptions that context calls os._exit(1) and skips further cleanup.
+        recorder: SO101LeRobotRecorder | None = None
         try:
             fps_float = 1.0 / env.unwrapped.step_dt
             fps = round(fps_float)
             if not math.isclose(fps_float, fps, rel_tol=0.0, abs_tol=1e-6):
                 raise ValueError(f"LeRobot requires an integer FPS, got {fps_float}")
 
-            with SO101LeRobotRecorder(
+            recorder = SO101LeRobotRecorder(
                 root=args_cli.output_dir,
                 repo_id=args_cli.dataset_repo_id,
                 fps=fps,
                 resume=args_cli.resume,
                 overwrite=args_cli.overwrite,
                 streaming_encoding=not args_cli.disable_streaming_encoding,
-            ) as recorder:
-                # Keep a handle for Hub upload after the recorder finalizes on exit.
-                dataset = recorder.dataset
-                print(
-                    f"LeRobot dataset: {recorder.root} "
-                    f"(existing episodes: {recorder.num_episodes}, fps: {fps})"
-                )
-                num_successful, num_failed = collect_policy_demos(
-                    env,
-                    policy,
-                    recorder,
-                    success_term,
-                    generation_num_trials=args_cli.generation_num_trials,
-                    max_retries=args_cli.max_retries,
-                    num_success_steps=args_cli.num_success_steps,
-                    disable_full_sim_buffer_reset=args_cli.disable_full_sim_buffer_reset,
-                    task_description=args_cli.task_description,
-                    action_noise=args_cli.action_noise,
-                    is_running=sim_app.is_running,
-                )
+            )
+            dataset = recorder.dataset
+            print(
+                f"LeRobot dataset: {recorder.root} "
+                f"(existing episodes: {recorder.num_episodes}, fps: {fps})"
+            )
+            num_successful, num_failed = collect_policy_demos(
+                env,
+                policy,
+                recorder,
+                success_term,
+                generation_num_trials=args_cli.generation_num_trials,
+                max_retries=args_cli.max_retries,
+                num_success_steps=args_cli.num_success_steps,
+                disable_full_sim_buffer_reset=args_cli.disable_full_sim_buffer_reset,
+                task_description=args_cli.task_description,
+                action_noise=args_cli.action_noise,
+                should_continue=lambda: sim_app.is_running() and not _STOP.is_set(),
+            )
         finally:
+            if recorder is not None:
+                try:
+                    recorder.close()
+                except Exception as exc:  # noqa: BLE001 — keep cleaning up env below
+                    print(f"Failed to finalize LeRobot dataset: {exc}")
             if policy.is_remote:
                 policy.shutdown_remote(
                     kill_server=getattr(args_cli, "remote_kill_on_exit", False)
