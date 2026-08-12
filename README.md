@@ -151,6 +151,12 @@ python -m shape_sorting.generate_policy_demos \
 
 Run `python -m shape_sorting.generate_policy_demos --help` for more options.
 
+
+
+https://github.com/user-attachments/assets/d1a73c54-f0c9-4ed2-bb4b-c7765d8c1150
+
+
+
 ### Teleoperation data collection
 
 https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
