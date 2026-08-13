@@ -7,7 +7,7 @@ Main features:
  - SO-101 arm embodiment
  - Scripted synthetic dataset generation for imitation learning
  - Teleoperation and data collection
- - Training and evaluation with LeRobot
+ - Training and evaluation with LeRobot and Artefacts
 
 Contents:
  - [Setup workspace](#setup-workspace)
@@ -131,6 +131,8 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 
 ## Building the dataset
 
+You can skip this step and use our [pre-generated dataset](https://huggingface.co/datasets/Artefacts/shape-sorting-so101) on Hugging Face.
+
 ### Scripted synthetic dataset generation
 
 This script will use a cuRobo based scripted policy to execute the shape-sorting task and record the demos in LeRobot dataset format.
@@ -233,8 +235,8 @@ For more info on training with LeRobot, see the [LeRobot documentation](https://
 
 Evaluate with the LeRobot CLI
 ```bash
-PYTHONPATH=. lerobot-eval \
-  --policy.path=Artefacts/act-shape-sorting-so101 \
+lerobot-eval \
+  --policy.path=Artefacts/act-shape-sorting-so101_1 \
   --policy.device=cuda \
   --output_dir ./outputs/eval/act_shape-sorting-so101 \
   --env.discover_packages_path=envhub \
