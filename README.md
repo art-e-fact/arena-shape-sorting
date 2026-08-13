@@ -126,6 +126,9 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
 
+<img width="2000" height="300" alt="shapes_row" src="https://github.com/user-attachments/assets/f97236a6-0cca-4d52-83b5-9f3f5f385347" />
+
+
 ## Building the dataset
 
 ### Scripted synthetic dataset generation
@@ -159,8 +162,6 @@ https://github.com/user-attachments/assets/d1a73c54-f0c9-4ed2-bb4b-c7765d8c1150
 
 ### Teleoperation data collection
 
-https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
-
 
 ```bash
 python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/record_demos.py \
@@ -176,6 +177,9 @@ python submodules/IsaacLab-Arena/isaaclab_arena/scripts/imitation_learning/recor
 ```
 
 > TODO: Add instructions for recording demos in LeRobot dataset format.
+
+
+https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
 
 ### Other tested teleop options for the SO-101 embodiment
 
