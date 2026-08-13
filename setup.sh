@@ -80,6 +80,12 @@ _setup_main() {
   export OMNI_KIT_ACCEPT_EULA=YES
   export ACCEPT_EULA=Y
   export ARENA_SHAPE_SORTING_ROOT="${REPO_ROOT}"
+  # Console scripts (lerobot-eval) do not put cwd on sys.path, so envhub is not
+  # importable unless the repo root is on PYTHONPATH.
+  case ":${PYTHONPATH:-}:" in
+    *":${REPO_ROOT}:"*) ;;
+    *) export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" ;;
+  esac
 
   cd "${REPO_ROOT}" || return 1
 
