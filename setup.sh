@@ -15,6 +15,8 @@
 #   --wheel   Use Arena's isaaclab-from-wheel group instead of from-source
 #   --force   Re-run uv sync even if the venv already exists
 #   -h/--help Show this help
+#
+# Optional env: ARENA_SO101_PATH — local isaaclab-so101 checkout (see DEVELOPMENT.md).
 
 _setup_main() {
   local REPO_ROOT ARENA_DIR VENV_DIR FORCE=false WHEEL=false
@@ -34,7 +36,7 @@ _setup_main() {
       --wheel) WHEEL=true ;;
       --force) FORCE=true ;;
       -h|--help)
-        sed -n '2,18p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \?//'
+        sed -n '2,20p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \?//'
         return 0
         ;;
       *)
@@ -69,10 +71,20 @@ _setup_main() {
   fi
 
   # uv venvs do not ship pip; install into Arena's env with uv pip.
-  echo "setup.sh: installing arena_envs and arena_so101 (editable) ..."
+  # arena_envs pulls the pinned arena-so101 git dependency.
+  echo "setup.sh: installing arena_envs (pulls pinned arena-so101) ..."
   uv pip install --python "${VENV_DIR}/bin/python" \
-    -e "${REPO_ROOT}/arena_envs" \
-    -e "${REPO_ROOT}/arena_so101[leader]" || return 1
+    -e "${REPO_ROOT}/arena_envs" || return 1
+
+  if [[ -n "${ARENA_SO101_PATH:-}" ]]; then
+    if [[ ! -d "${ARENA_SO101_PATH}" ]]; then
+      echo "setup.sh: ARENA_SO101_PATH is not a directory: ${ARENA_SO101_PATH}" >&2
+      return 1
+    fi
+    echo "setup.sh: reinstalling arena-so101 editable from ${ARENA_SO101_PATH} ..."
+    uv pip install --python "${VENV_DIR}/bin/python" \
+      -e "${ARENA_SO101_PATH}[leader]" || return 1
+  fi
 
   # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate" || return 1

@@ -11,11 +11,12 @@ WORKDIR="/workspaces/arena-shape-sorting"
 DATASETS_HOST_MOUNT_DIRECTORY="$HOME/datasets"
 MODELS_HOST_MOUNT_DIRECTORY="$HOME/models"
 EVAL_HOST_MOUNT_DIRECTORY="$HOME/eval"
+SO101_HOST_PATH="${ARENA_SO101_PATH:-}"
 FORCE_REBUILD=false
 CONTAINER_SUFFIX=""
 CONTAINER_SUFFIX_EXPLICIT=false
 
-while getopts ":d:m:e:hn:rn:Rn:vn:s:" OPTION; do
+while getopts ":d:m:e:hn:rn:Rn:vn:s:S:" OPTION; do
     case $OPTION in
 
         d)
@@ -26,6 +27,9 @@ while getopts ":d:m:e:hn:rn:Rn:vn:s:" OPTION; do
             ;;
         e)
             EVAL_HOST_MOUNT_DIRECTORY=$OPTARG
+            ;;
+        S)
+            SO101_HOST_PATH=$OPTARG
             ;;
         n)
             DOCKER_IMAGE_NAME=${OPTARG}
@@ -62,6 +66,8 @@ while getopts ":d:m:e:hn:rn:Rn:vn:s:" OPTION; do
             echo "  -R (Force rebuilding of the docker image, without cache.)"
             echo "  -s <suffix> (Suffix appended to the container name, allowing multiple containers to run simultaneously."
             echo "      Defaults to the repo directory name.)"
+            echo "  -S <isaaclab-so101 checkout> (Bind-mount a local arena-so101 checkout and install it editable."
+            echo "      Overrides ARENA_SO101_PATH. See DEVELOPMENT.md.)"
             exit 0
             ;;
         \?)
@@ -80,6 +86,15 @@ shift $((OPTIND-1))
 if [ "$CONTAINER_SUFFIX_EXPLICIT" = false ]; then
     repo_dir=$(basename "$REPO_ROOT")
     [ -n "$repo_dir" ] && CONTAINER_SUFFIX="-${repo_dir}"
+fi
+
+if [ -n "$SO101_HOST_PATH" ]; then
+    if [ ! -d "$SO101_HOST_PATH" ]; then
+        echo "isaaclab-so101 path is not a directory: $SO101_HOST_PATH" >&2
+        exit 1
+    fi
+    SO101_HOST_PATH="$(cd "$SO101_HOST_PATH" && pwd)"
+    echo "Using local arena-so101 checkout: $SO101_HOST_PATH"
 fi
 
 echo "Using Docker image: $DOCKER_IMAGE_NAME:$DOCKER_VERSION_TAG"
@@ -116,6 +131,9 @@ fi
 
 if [ "$( docker container inspect -f '{{.State.Running}}' $DOCKER_IMAGE_NAME'-'$DOCKER_VERSION_TAG$CONTAINER_SUFFIX 2>/dev/null)" = "true" ]; then
   echo "Container already running. Attaching."
+  if [ -n "$SO101_HOST_PATH" ]; then
+    echo "Note: -S / ARENA_SO101_PATH is ignored for an already-running container. Restart it to remount."
+  fi
   docker exec -it $DOCKER_IMAGE_NAME-$DOCKER_VERSION_TAG$CONTAINER_SUFFIX su $(id -un)
 else
     DOCKER_RUN_ARGS=("--name" "$DOCKER_IMAGE_NAME-$DOCKER_VERSION_TAG$CONTAINER_SUFFIX"
@@ -152,6 +170,11 @@ else
                     "--env" "DOCKER_RUN_GROUP_ID=$(id -g)"
                     "--env" "DOCKER_RUN_GROUP_NAME=$(id -gn)"
                     )
+
+    if [ -n "$SO101_HOST_PATH" ]; then
+        DOCKER_RUN_ARGS+=("-v" "${SO101_HOST_PATH}:/workspaces/arena-so101")
+        DOCKER_RUN_ARGS+=("--env" "ARENA_SO101_PATH=/workspaces/arena-so101")
+    fi
 
     # Pass host "input" GID so entrypoint can grant /dev/input/event* access for gamepads.
     INPUT_GID="$(getent group input | cut -d: -f3 || true)"

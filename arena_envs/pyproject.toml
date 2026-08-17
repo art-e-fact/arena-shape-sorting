@@ -12,6 +12,8 @@ dependencies = [
     "isaaclab_arena",
     "junit-xml",
     "build123d",
+    # Pin SHA when bumping; see DEVELOPMENT.md.
+    "arena-so101[leader] @ git+https://github.com/art-e-fact/isaaclab-so101.git@6cd072a6d8c117c0bc691d1c473ab6d7da26e785",
 ]
 
 [tool.setuptools.packages.find]

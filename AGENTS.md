@@ -6,7 +6,7 @@ This file provides guidance to AI coding agents (Claude Code, OpenAI Codex, etc.
 
 `arena-shape-sorting` is a project built **on top of** IsaacLab-Arena, following the "Arena in your repository" pattern: Arena is vendored unmodified as a git submodule (`submodules/IsaacLab-Arena`) and extended purely through its registration API. Our own code lives in the `arena_envs` package, which defines custom environments and registers them with Arena.
 
-We consume Arena as a dependency — we do **not** develop it here. Treat everything under `submodules/IsaacLab-Arena` as read-only third-party code.
+We consume Arena and the SO-101 embodiment as dependencies — we do **not** develop them here. Treat everything under `submodules/IsaacLab-Arena` as read-only third-party code. SO-101 (`arena_so101`) comes from [art-e-fact/isaaclab-so101](https://github.com/art-e-fact/isaaclab-so101), pinned in `arena_envs/pyproject.toml`. Local editable overrides are documented in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Skill library
 
@@ -16,7 +16,7 @@ Multi-step workflows are captured as Agent Skills under `.agents/skills/`. When 
 
 ## Docker environment
 
-Anything that touches Isaac Sim or Arena (running environments, scripts, evaluation) runs inside this repo's Docker container. The image bundles Isaac Sim, Isaac Lab, the Arena submodule, and our `arena_envs` package (installed editable). The repo root is mounted at `/workspaces/arena-shape-sorting`, so host edits take effect immediately.
+Anything that touches Isaac Sim or Arena (running environments, scripts, evaluation) runs inside this repo's Docker container. The image bundles Isaac Sim, Isaac Lab, the Arena submodule, our `arena_envs` package (installed editable), and the pinned `arena-so101` package from GitHub. The repo root is mounted at `/workspaces/arena-shape-sorting`, so edits on the host take effect immediately.
 
 Each clone gets its own container (shared image `arena-shape-sorting:latest`, per-clone container name). **Don't hardcode the container name** — use the `dev-container` skill to build, start, attach to, discover, or exec into it.
 
@@ -35,14 +35,14 @@ docker exec "$ARENA_CONTAINER" su $(id -un) -c \
 
 Inside the container, `python` is aliased to `/isaac-sim/python.sh` — prefer the explicit path in `docker exec` invocations from outside, where the alias is not active.
 
-A non-Docker host install is also defined in `pixi.toml` (`pixi run install`) for environments that already satisfy the Isaac Sim / Isaac Lab prerequisites.
+A non-Docker host install is `source ./setup.sh`. Contributor workflows (SO-101 pin, local checkout, Docker `-S`) are in [DEVELOPMENT.md](DEVELOPMENT.md).
 
 ## Repository layout
 
-- `arena_envs/` — our package: custom environments that subclass Arena base classes and register via `@register_environment` (`src/arena_envs/`)
+- `arena_envs/` — our package: custom environments that subclass Arena base classes and register via `@register_environment` (`src/arena_envs/` / `src/shape_sorting/`)
 - `docker/` — container build (`Dockerfile`) and run (`run_docker.sh`) scripts
 - `submodules/IsaacLab-Arena/` — vendored Arena submodule (read-only), which itself vendors Isaac Lab under `submodules/IsaacLab`
-- `pixi.toml` — host install / submodule bootstrap tasks
+- `DEVELOPMENT.md` — pin bumps, local `arena-so101` checkout, Docker `-S`
 
 ## Defining and running environments
 
@@ -63,5 +63,6 @@ For the full external-integration reference, see the Arena docs under `submodule
 ## Boundaries
 
 - **Never edit the Arena submodule** to add features — extend it from `arena_envs` through the registration API. If Arena itself needs a change, that belongs upstream, not here.
+- **Never vendor `arena_so101/` back into this repo** — change [isaaclab-so101](https://github.com/art-e-fact/isaaclab-so101) and bump the SHA (see [DEVELOPMENT.md](DEVELOPMENT.md)).
 - **Never commit models, datasets, or secrets.** Keep them on the host and mount them via `./docker/run_docker.sh -d <datasets> -m <models> -e <eval>`.
 - **Ask first** before changing `docker/` or bumping `submodules/IsaacLab-Arena` — these affect every contributor.

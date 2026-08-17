@@ -126,7 +126,8 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             if not hasattr(arena_so101, "register"):
                 raise ImportError(
                     "import arena_so101 did not load the package (got a shadowed path). "
-                    "Install with: /isaac-sim/python.sh -m pip install -e so101_arena"
+                    "Install arena-so101 from GitHub (see arena_envs/pyproject.toml) "
+                    "or set ARENA_SO101_PATH to a local checkout (see DEVELOPMENT.md)."
                 )
             arena_so101.register()
 

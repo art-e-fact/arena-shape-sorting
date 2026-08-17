@@ -25,6 +25,7 @@ Contents:
     - [Train an ACT policy on the shape-sorting dataset](#train-an-act-policy-on-the-shape-sorting-dataset)
     - [Evaluate with the LeRobot CLI](#evaluate-with-the-lerobot-cli)
     - [Run the evaluation with Artefacts](#run-the-evaluation-with-artefacts)
+ - [Development](DEVELOPMENT.md)
 
 ## Set up workspace
 
@@ -185,7 +186,7 @@ https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
 
 ### Other tested teleop options for the SO-101 embodiment
 
-*See the [SO-101 embodiment](arena_so101/README.md#joint-space-gamepad-layout-so101_abs_joint--gamepad) for more detail.*
+*See the [SO-101 embodiment](https://github.com/art-e-fact/isaaclab-so101#joint-space-gamepad-layout-so101_abs_joint--gamepad) for more detail.*
 
 SE(3) differential gamepad:
 ```bash

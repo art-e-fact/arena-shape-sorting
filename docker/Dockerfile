@@ -98,7 +98,6 @@ RUN (type -p wget >/dev/null || (apt update && apt install wget -y)) \
 ################################
 # Install IsaacLab Arena
 ################################
-COPY submodules/IsaacLab-Arena/setup.py ${ARENA_PATH}/
 COPY submodules/IsaacLab-Arena/pyproject.toml ${ARENA_PATH}/
 COPY submodules/IsaacLab-Arena/isaaclab_arena ${ARENA_PATH}/isaaclab_arena
 COPY submodules/IsaacLab-Arena/isaaclab_arena_g1 ${ARENA_PATH}/isaaclab_arena_g1
@@ -113,10 +112,8 @@ RUN /isaac-sim/python.sh -m pip install -e "${ARENA_PATH}/[dev]"
 # Install arena-shape-sorting package
 ################################
 COPY arena_envs ${WORKDIR}/arena_envs
+# Pulls pinned arena-so101 from GitHub (see arena_envs/pyproject.toml).
 RUN /isaac-sim/python.sh -m pip install -e "${WORKDIR}/arena_envs"
-
-COPY so101_arena ${WORKDIR}/so101_arena
-RUN /isaac-sim/python.sh -m pip install -e "${WORKDIR}/so101_arena[leader]"
 
 RUN echo "alias python='/isaac-sim/python.sh'" >> /etc/bash.bashrc
 RUN echo "alias pip3='/isaac-sim/python.sh -m pip'" >> /etc/bash.bashrc

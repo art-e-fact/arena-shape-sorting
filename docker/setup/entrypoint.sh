@@ -62,6 +62,15 @@ fi
 
 [ -f /etc/profile.d/groot_deps.sh ] && set -a && source /etc/profile.d/groot_deps.sh && set +a
 
+if [ -n "${ARENA_SO101_PATH:-}" ]; then
+    if [ ! -d "${ARENA_SO101_PATH}" ]; then
+        echo "ARENA_SO101_PATH is not a directory: ${ARENA_SO101_PATH}" >&2
+        exit 1
+    fi
+    echo "Installing arena-so101 editable from ${ARENA_SO101_PATH} ..."
+    /isaac-sim/python.sh -m pip install -e "${ARENA_SO101_PATH}[leader]"
+fi
+
 if [ $# -ge 1 ]; then
     echo "alias pytest='/isaac-sim/python.sh -m pytest'" >> /etc/aliasess.bashrc
     exec sudo --preserve-env -u $DOCKER_RUN_USER_NAME \
