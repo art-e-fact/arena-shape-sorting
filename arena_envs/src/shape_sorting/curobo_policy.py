@@ -140,8 +140,8 @@ class CuroboPolicyCfg(PolicyCfg):
     jaw_closed: float = _JAW_CLOSE_RAD
     """Jaw command during CLOSE / ATTACH / PLACE [rad]."""
 
-    close_steps: int = 20
-    """Sim steps to hold the closed jaw before ATTACH."""
+    close_steps: int = 12
+    """Sim steps to hold the closed jaw before ATTACH (~0.4 s at the default 30 Hz)."""
 
     jaw_empty_tol: float = math.radians(5.0)
     """If measured jaw is within this of ``jaw_closed`` after CLOSE, treat grasp as empty."""
@@ -149,11 +149,11 @@ class CuroboPolicyCfg(PolicyCfg):
     max_grasp_retries: int = 5
     """Max APPROACH→CLOSE attempts per shape before aborting (empty grasps)."""
 
-    open_steps: int = 20
-    """Sim steps to hold the open jaw before HOME."""
+    open_steps: int = 12
+    """Sim steps to hold the open jaw before HOME (~0.4 s at the default 30 Hz)."""
 
-    home_steps: int = 30
-    """Sim steps to cosine-interpolate to the home joint pose."""
+    home_steps: int = 18
+    """Sim steps to cosine-interpolate to the home joint pose (~0.6 s at 30 Hz)."""
 
     use_cuda_graph: bool = False
     """Enable cuRobo CUDA graphs."""
@@ -164,8 +164,14 @@ class CuroboPolicyCfg(PolicyCfg):
     optimizer_collision_activation_distance: float = 0.03
     """Soft collision-cost activation distance [m]; larger keeps more clearance."""
 
-    waypoint_stride: int = 2
-    """Play every N-th interpolated waypoint (1 = all)."""
+    waypoint_stride: int = 3
+    """Play every N-th interpolated waypoint (1 = all).
+
+    One waypoint is consumed per env step, so this sets the arm's wall-clock speed:
+    ``interpolation_dt (0.025 s) * stride / step_dt``. At the default 30 Hz env rate,
+    stride 3 plays the plan at ~2.25x its planned speed — matching the 2.5x that stride 2
+    gave at 50 Hz. Raise it with the env rate, or the demos stretch out and every episode
+    carries more near-duplicate frames."""
 
     debug_viz: bool = False
     """Draw goal + EE frame markers in the Kit viewport."""

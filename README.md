@@ -124,6 +124,7 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 | `--clearance` | `0.003` | Hole clearance around each piece (m) |
 | `--edge_chamfer` | `0.001` | Piece top/bottom edge chamfer (m) |
 | `--hole_chamfer` | `0.001` | Hole rim lead-in chamfer (m) |
+| `--control_hz` | `30.0` | Env-step rate (Hz), and the fps of datasets recorded from this env. Physics stays near 200 Hz. Keep the CuroboPolicy pacing flags (`--waypoint_stride`, `--close_steps`, `--open_steps`, `--home_steps`) in proportion, or the demos stretch in wall-clock time instead of getting shorter |
 
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
 
@@ -156,6 +157,21 @@ python -m shape_sorting.generate_policy_demos \
 ```
 
 Run `python -m shape_sorting.generate_policy_demos --help` for more options.
+
+**Adding episodes to an existing dataset.** `--generation_num_trials` counts
+successes *for this run*, not the size of the finished dataset, so `--resume`
+with the same number appends that many more:
+
+```bash
+python -m shape_sorting.generate_policy_demos \
+  ... --resume --generation_num_trials 150 ...   # 150 existing -> 300
+```
+
+`--resume` and `--overwrite` are mutually exclusive, and resume appends to the
+**local** `--output_dir` — it does not pull the dataset back from the Hub, so if
+the local copy is gone, download it first. `--push_to_hub` then uploads the whole
+dataset, not just the new episodes. Full semantics and the validation rules:
+[`dataset.md`](training_research.local/dataset.md).
 
 
 
@@ -232,7 +248,102 @@ lerobot-train \
 
 For more info on training with LeRobot, see the [LeRobot documentation](https://huggingface.co/docs/lerobot/main/en/il_robots#train-a-policy).
 
+### Train on a Nebius GPU
 
+`nebius/train.sh` submits training as a one-off Nebius job: it provisions a GPU,
+installs LeRobot, runs `lerobot-train`, and releases the GPU when the run ends —
+no VM to create by hand and nothing to remember to shut down. `--timeout` is a
+hard ceiling, so a hung run cannot quietly bill overnight.
+
+Prerequisites: the [Nebius CLI](https://docs.nebius.com/cli) authenticated
+(`nebius auth login`), and somewhere to get `HF_TOKEN` and `WANDB_API_KEY` from.
+
+```bash
+cp .env.example .env   # then fill in the two tokens; .env is gitignored
+```
+
+Each token is resolved on its own, in this order: the env file (`.env` in the
+repo root, or `--env-file PATH`), then the surrounding shell, then a MysteryBox
+secret (`creds` by default, `--secret NAME` to change it). A partial
+`.env` is fine — whatever is missing falls back. The launcher prints which
+source it used for each token.
+
+A token from `.env` or the shell is sent as a plain job environment variable,
+which means it is stored in the job spec and readable by anyone with access to
+the project; MysteryBox keeps it out of the spec. Fine for a personal token,
+worth avoiding for a shared one.
+
+```bash
+nebius/train.sh --name smolvla-500ep --timeout 4h -- \
+  --policy.path=lerobot/smolvla_base \
+  --policy.device=cuda \
+  --policy.input_features=null --policy.output_features=null \
+  --policy.repo_id=Artefacts/smolvla-shape-sorting-30fps \
+  --policy.push_to_hub=true \
+  --save_checkpoint_to_hub=true \
+  --dataset.repo_id=Artefacts/shape-sorting-so101-30fps \
+  --dataset.eval_split=0.1 \
+  --batch_size=64 --steps=20000 \
+  --save_freq=2000 --eval_steps=500 --log_freq=100 \
+  --num_workers=8 --seed=42 --env_eval_freq=0 \
+  --wandb.enable=true --wandb.disable_artifact=true \
+  --job_name=smolvla-shape-sorting-500ep
+```
+
+Everything after `--` is passed to `lerobot-train` untouched. The job disk is
+discarded when the job ends, so `--policy.push_to_hub` and
+`--save_checkpoint_to_hub` are what make a run recoverable.
+
+`--policy.repo_id` and `--policy.input_features=null
+--policy.output_features=null` are not optional: `smolvla_base` inherits
+`push_to_hub=true` and the camera keys of its own training set, and a run without
+those flags dies at startup. Why, and what the error messages look like:
+[`smolvla-tuning.md`](training_research.local/smolvla-tuning.md).
+
+Defaults: `gpu-h100-sxm` / `1gpu-16vcpu-200gb`, 12 h timeout, 250 GiB disk.
+Add `--platform gpu-h200-sxm` for 141 GB of VRAM, `--preemptible` for a cheaper
+but interruptible GPU, `--follow` to stream logs, or `--dry-run` to validate the
+request for free. `nebius/train.sh --help` lists them all.
+
+```bash
+nebius ai job list                 # what is running
+nebius ai job logs <id> --follow   # stream a run
+nebius ai job cancel <id>          # stop paying for it now
+nebius ai job ssh <id>             # shell into a running job to debug
+```
+
+#### Choosing batch size and steps
+
+**`--batch_size=64`.** Throughput flattens above it (128 buys 8% for double the
+VRAM) and SmolVLA's preset learning rate of 1e-4 is tuned for it. Training is
+GPU-bound, so `--num_workers=8` is already enough.
+
+**Steps: one epoch is `train_frames / batch_size` steps**, and the run starts
+overfitting at roughly 12 epochs. Recompute this whenever the dataset changes —
+a step count from a smaller dataset does not transfer.
+
+| Dataset | steps/epoch @ bs64 | ~12 epochs | run to |
+| --- | ---: | ---: | ---: |
+| 150 episodes | 435 | 5,000 | — |
+| 500 episodes (current) | 1,451 | 17,000 | **20,000** |
+
+The 12-epoch elbow was measured at 150 episodes and has not been re-measured at
+500, so the command above runs ~15% past it. A curve that visibly turns over
+tells you where the elbow is; one that stops at the guess tells you nothing. If
+the held-out loss is still falling at the end, `--resume` extends the run.
+
+Checkpoint every 2,000 steps and pick by rollout success rate rather than taking
+the last one — the repo root always holds the final step, which is rarely the
+best. Loading an intermediate checkpoint back:
+
+```bash
+hf download Artefacts/smolvla-shape-sorting-30fps \
+  --include "checkpoints/006000/pretrained_model/*" --local-dir ckpt
+# then --policy.path=ckpt/checkpoints/006000/pretrained_model
+```
+
+Where these numbers come from — the batch-size sweep, the measured loss curve,
+and the epoch arithmetic: [`training_research.local/`](training_research.local/index.md).
 
 Evaluate with the LeRobot CLI
 ```bash
