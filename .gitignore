@@ -10,3 +10,7 @@ logs/*
 outputs/*
 *.hdf5
 datasets/*
+.env
+.env.*
+!.env.example
+*.local/

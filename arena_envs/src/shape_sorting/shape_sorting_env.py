@@ -50,6 +50,36 @@ def _camera_offset_look_at(
     )
 
 
+PHYSICS_HZ = 200.0
+"""Physics rate the scene was tuned at (Arena default: ``sim.dt=1/200``, ``decimation=4``).
+
+``decimation`` is derived from :attr:`ShapeSortingEnvironmentCfg.control_hz` to hold the
+physics rate near this value, so changing the control rate does not change contact
+behaviour (grasp reliability, piece settling).
+"""
+
+
+def _apply_control_rate(env_cfg, control_hz: float) -> None:
+    """Set the env-step rate, which is also the recorded LeRobot dataset fps.
+
+    ``generate_policy_demos`` derives the dataset fps from ``1 / env.step_dt`` and
+    ``step_dt = sim.dt * decimation``, so this is the only place the recording rate is set.
+
+    ``render_interval`` is pinned to ``decimation`` so exactly one RTX render lands on the
+    last physics substep of each env step. The counter it is checked against is never reset,
+    so the alignment holds for the whole run. Anything smaller re-renders frames no
+    observation ever reads (the Arena default renders twice per step).
+    """
+    if control_hz <= 0.0:
+        raise ValueError(f"control_hz must be > 0, got {control_hz}")
+    decimation = max(1, round(PHYSICS_HZ / control_hz))
+    env_cfg.decimation = decimation
+    env_cfg.sim.dt = 1.0 / (control_hz * decimation)
+    env_cfg.sim.render_interval = decimation
+    step_hz = 1.0 / (env_cfg.sim.dt * decimation)
+    assert abs(step_hz - control_hz) < 1e-6, f"step rate {step_hz} != control_hz {control_hz}"
+
+
 @dataclass(frozen=True)
 class ShapeInfo:
     """Privileged per-piece metadata attached to the manager env cfg.
@@ -90,6 +120,22 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER
     debug_key_reset: bool = False
     """If True, press R (Isaac window focused) to end the current episode early."""
+    control_hz: float = 30.0
+    """Env-step rate [Hz], and therefore the fps of datasets recorded from this env.
+
+    Physics stays near :data:`PHYSICS_HZ`; only the action/observation/render rate changes.
+    Use an integer — LeRobot rejects a non-integer fps. Note this does not by itself change
+    how many frames an episode has: scripted phases are step-counted, so lowering the rate
+    stretches the demo in wall-clock time instead. Pair it with the CuroboPolicy pacing
+    flags (``--waypoint_stride``, ``--close_steps``, ``--open_steps``, ``--home_steps``)
+    to keep the arm's real-world speed."""
+    reset_robot_joint_noise: float = 0.0
+    """Uniform ±noise [rad] around the robot's default joint pose at every episode reset.
+
+    Arena registers no robot reset event, so without this term the arm keeps whatever pose
+    the previous episode ended in — typically tangled with the freshly re-placed sorting box.
+    0 resets it exactly to the default pose; a small value also varies the start state so a
+    learned policy sees more than one initial configuration."""
 
 
 class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg]):
@@ -100,8 +146,9 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
     def build(self, cfg: ShapeSortingEnvironmentCfg) -> IsaacLabArenaEnvironment:
         """Build the environment from its typed configuration."""
+        import isaaclab.envs.mdp as mdp_isaac_lab
         from isaaclab.envs.common import ViewerCfg
-        from isaaclab.managers import SceneEntityCfg, TerminationTermCfg
+        from isaaclab.managers import EventTermCfg, SceneEntityCfg, TerminationTermCfg
 
         from isaaclab_arena.assets.object_base import ObjectType
         from isaaclab_arena.assets.object_reference import ObjectReference
@@ -159,7 +206,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
         for asset in layout.pieces:
             asset.add_relation(On(table_reference))
-            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.5, y_min=-0.11, y_max=0.2))
+            asset.add_relation(PositionLimits(x_min=0.4, x_max=0.5, y_min=-0.01, y_max=0.2))
 
         additional_table_objects = [
             self.asset_registry.get_asset_by_name(name)() for name in cfg.additional_table_objects
@@ -259,8 +306,24 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
         # Privileged layout metadata + viewer / debug hooks for the manager env cfg.
         def _configure_env_cfg(env_cfg):
+            _apply_control_rate(env_cfg, cfg.control_hz)
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
             env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in layout.pieces]
+            # Send the arm back to its default pose (± noise) on every reset. Nothing else
+            # does: Arena's reset events only re-place the box and pieces, so the arm would
+            # start the next episode where it dropped the last piece — often intersecting
+            # the re-placed box, which the policy then has to fight its way out of.
+            # ponytail: the sampled offsets are not collision-checked. Keep the noise small;
+            # for wide start-state coverage, reject samples with the cuRobo world checker.
+            env_cfg.events.reset_robot_joints = EventTermCfg(
+                func=mdp_isaac_lab.reset_joints_by_offset,
+                mode="reset",
+                params={
+                    "asset_cfg": SceneEntityCfg("robot"),
+                    "position_range": (-cfg.reset_robot_joint_noise, cfg.reset_robot_joint_noise),
+                    "velocity_range": (0.0, 0.0),
+                },
+            )
             if cfg.debug_key_reset:
                 # Truncation (not success): ends the episode so policy_runner resets and continues.
                 env_cfg.terminations.debug_key_reset = TerminationTermCfg(

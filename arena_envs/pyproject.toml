@@ -12,6 +12,8 @@ dependencies = [
     "isaaclab_arena",
     "junit-xml",
     "build123d",
+    # LeRobot 0.6 pulls huggingface-hub>=1.6; transformers 4.x requires hub<1.
+    "transformers>=5.4.0,<5.6.0",
     # Pin SHA when bumping; see DEVELOPMENT.md.
     "arena-so101[leader] @ git+https://github.com/art-e-fact/isaaclab-so101.git@6cd072a6d8c117c0bc691d1c473ab6d7da26e785",
 ]

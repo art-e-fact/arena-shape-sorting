@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Host (non-Docker) environment for arena-shape-sorting.
 #
-# Syncs IsaacLab-Arena's uv venv (Isaac Lab + Arena), installs our packages
-# editable into it, then activates that venv in the current shell.
+# Syncs IsaacLab-Arena's uv venv (Isaac Lab + Arena), installs cuRobo and our
+# packages editable into it, then activates that venv in the current shell.
 #
 # Must be sourced so activation sticks:
 #   source ./setup.sh
@@ -13,13 +13,13 @@
 #
 # Options (pass after sourcing, e.g. `source ./setup.sh --wheel`):
 #   --wheel   Use Arena's isaaclab-from-wheel group instead of from-source
-#   --force   Re-run uv sync even if the venv already exists
+#   --force   Re-run uv sync and regenerate the cuRobo SO-101 config
 #   -h/--help Show this help
 #
 # Optional env: ARENA_SO101_PATH — local isaaclab-so101 checkout (see DEVELOPMENT.md).
 
 _setup_main() {
-  local REPO_ROOT ARENA_DIR VENV_DIR FORCE=false WHEEL=false
+  local REPO_ROOT ARENA_DIR CUROBO_DIR VENV_DIR CUDA_EXTRA CUROBO_YML FORCE=false WHEEL=false
   local UV_SYNC_ARGS=()
 
   # Resolve repo root whether sourced or executed.
@@ -29,6 +29,7 @@ _setup_main() {
     REPO_ROOT="$(cd -- "$(dirname -- "$0")" && pwd)"
   fi
   ARENA_DIR="${REPO_ROOT}/submodules/IsaacLab-Arena"
+  CUROBO_DIR="${REPO_ROOT}/submodules/curobo"
   VENV_DIR="${ARENA_DIR}/.venv"
 
   while [[ $# -gt 0 ]]; do
@@ -53,6 +54,12 @@ _setup_main() {
     return 1
   fi
 
+  if [[ ! -f "${CUROBO_DIR}/pyproject.toml" ]]; then
+    echo "setup.sh: cuRobo submodule missing at ${CUROBO_DIR}" >&2
+    echo "  Run: git submodule update --init --recursive" >&2
+    return 1
+  fi
+
   if ! command -v uv >/dev/null 2>&1; then
     echo "setup.sh: uv not found on PATH. Install: https://docs.astral.sh/uv/" >&2
     return 1
@@ -70,6 +77,17 @@ _setup_main() {
     echo "setup.sh: Arena venv already present (pass --force to re-sync)"
   fi
 
+  # cuRobo: imported at runtime by shape_sorting.curobo_policy / curobo_motion.
+  # Not in arena_envs' dependencies because it is vendored as a submodule.
+  # No --no-build-isolation needed: this version JIT-compiles its kernels through
+  # cuda.core, so the build needs setuptools only, not the installed torch.
+  # The cuda-core extra must match the CUDA that the venv's torch was built against.
+  CUDA_EXTRA="cu$("${VENV_DIR}/bin/python" -c \
+    'import torch; print((torch.version.cuda or "12").split(".")[0])')" || return 1
+  echo "setup.sh: installing cuRobo (${CUDA_EXTRA}) from ${CUROBO_DIR} ..."
+  uv pip install --python "${VENV_DIR}/bin/python" \
+    -e "${CUROBO_DIR}[${CUDA_EXTRA}]" || return 1
+
   # uv venvs do not ship pip; install into Arena's env with uv pip.
   # arena_envs pulls the pinned arena-so101 git dependency.
   echo "setup.sh: installing arena_envs (pulls pinned arena-so101) ..."
@@ -86,11 +104,25 @@ _setup_main() {
       -e "${ARENA_SO101_PATH}[leader]" || return 1
   fi
 
+  export OMNI_KIT_ACCEPT_EULA=YES
+  export ACCEPT_EULA=Y
+
+  # so101.yml is generated, not shipped: it lands inside the installed arena_so101
+  # package, so deleting the venv deletes it too. CuroboPolicy only loads it once a
+  # rollout is already running, so a missing file surfaces as a crash minutes in —
+  # generate it here instead. Needs headless Isaac Sim (USD→URDF) + CUDA (sphere fit).
+  CUROBO_YML="$("${VENV_DIR}/bin/python" -c \
+    'from shape_sorting.curobo_motion import _DEFAULT_ROBOT_YML as p; print(p)')" || return 1
+  if [[ "${FORCE}" == true || ! -f "${CUROBO_YML}" ]]; then
+    echo "setup.sh: generating cuRobo SO-101 config (a few minutes) -> ${CUROBO_YML}"
+    "${VENV_DIR}/bin/python" -m arena_so101.generate_curobo_config --headless || return 1
+  else
+    echo "setup.sh: cuRobo SO-101 config present (pass --force to regenerate)"
+  fi
+
   # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate" || return 1
 
-  export OMNI_KIT_ACCEPT_EULA=YES
-  export ACCEPT_EULA=Y
   export ARENA_SHAPE_SORTING_ROOT="${REPO_ROOT}"
   # Console scripts (lerobot-eval) do not put cwd on sys.path, so envhub is not
   # importable unless the repo root is on PYTHONPATH.
