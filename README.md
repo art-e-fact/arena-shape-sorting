@@ -151,12 +151,35 @@ python -m shape_sorting.generate_policy_demos \
   --push_to_hub \
   --num_success_steps 12 \
   --action_noise 0.01 \
+  --grasp_perturb_prob 0.3 \
+  --miss_notice_delay_max_steps 45 \
   shape_sorting_test \
   --embodiment so101_abs_joint \
   --debug_key_reset
 ```
 
 Run `python -m shape_sorting.generate_policy_demos --help` for more options.
+
+**Recovery clips.** One rollout is not one episode. The scripted policy marks a
+*checkpoint* after each verified insertion and asks for a *cut* when it catches its
+own mistake; a cut throws away the frames since the last checkpoint, saves the
+confirmed ones as an episode, and starts a new episode at the failure state. A
+recovery episode therefore opens on "gripper closed on nothing" and its actions are
+the fix, so the dataset teaches the recovery without teaching the mistake.
+
+The two flags above are what create those failures on purpose, since cuRobo plans
+from ground truth and almost never misses on its own:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--grasp_perturb_prob` | `0` | Probability that the **first** grasp attempt on a piece is offset. Retries use the true pose, so the recorded recovery is correct. |
+| `--grasp_perturb_xy_m` | `0.02` | Half-width of the uniform XY offset [m]. Too large and the plan fails outright instead of near-missing — check how many perturbed attempts still plan in the logs. |
+| `--miss_notice_delay_max_steps` | `0` | Max steps to carry an empty gripper before noticing, sampled per miss. Non-zero also covers "empty gripper halfway to the bin", which is where a trained policy actually fails. 45 ≈ 1.5 s at 30 fps. |
+| `--insert_settle_steps` | `15` | Extra open-gripper steps to wait for the piece to land before declaring the insertion failed (which ends the rollout). |
+
+`--generation_num_trials` still counts **successful rollouts**, so a run exports at
+least that many episodes and usually more. Why this matters for training:
+[`recovery-gap.md`](training_research.local/recovery-gap.md).
 
 **Adding episodes to an existing dataset.** `--generation_num_trials` counts
 successes *for this run*, not the size of the finished dataset, so `--resume`
@@ -172,6 +195,12 @@ python -m shape_sorting.generate_policy_demos \
 the local copy is gone, download it first. `--push_to_hub` then uploads the whole
 dataset, not just the new episodes. Full semantics and the validation rules:
 [`dataset.md`](training_research.local/dataset.md).
+
+> **Do not append recovery clips to a dataset you also train a held-out split on.**
+> `--dataset.eval_split` holds out the *last* episodes, not a random sample, so
+> resuming with grasp perturbation turned on makes the held-out set almost entirely
+> recovery clips and the held-out loss stops measuring generalisation. Regenerate the
+> dataset with perturbation enabled from the start instead.
 
 
 

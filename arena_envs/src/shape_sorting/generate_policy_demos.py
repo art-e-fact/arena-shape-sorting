@@ -9,11 +9,23 @@ Fork of Arena ``policy_runner.py`` with success filtering and a
 * ``--max_retries`` — stop after this many failed episodes (optional)
 * ``--output_dir`` — local LeRobot v3 dataset root
 
-Only successful episodes are committed; failed episodes are discarded.
+One rollout produces one or more LeRobot episodes ("clips"). Scripted policies mark
+verified sub-steps with a *checkpoint* and their own mistakes with a *cut*: a cut drops
+the frames recorded since the last checkpoint, saves the confirmed prefix as its own
+episode, and starts a new one at the failure state. That is what puts "gripper closed on
+nothing" at the start of a clip whose actions recover from it, without teaching the
+mistake. Frames after the last checkpoint of a failed rollout are discarded as before.
+See ``demo_clips.ClipRecorder`` and ``training_research.local/recovery-gap.md``.
 
-Scripted policies may implement ``is_demonstration_ended() -> bool`` so a finished
-sequence ends the episode early instead of waiting for timeout (failed attempt if
-task success has not held for ``--num_success_steps``).
+``--generation_num_trials`` still counts *successful rollouts*, not clips; a run
+therefore exports at least that many episodes, usually more.
+
+Scripted policies may implement two duck-typed hooks:
+
+* ``is_demonstration_ended() -> bool`` — a finished sequence ends the episode early
+  instead of waiting for timeout (failed attempt if task success has not held for
+  ``--num_success_steps``).
+* ``pop_demo_events() -> list[str]`` — "checkpoint" / "cut" as above.
 
 Example::
 
@@ -23,6 +35,8 @@ Example::
       --generation_num_trials 10 \\
       --max_retries 40 \\
       --action_noise 0.01 \\
+      --grasp_perturb_prob 0.3 \\
+      --miss_notice_delay_max_steps 45 \\
       --output_dir ./datasets/curobo_shape_sorting \\
       --dataset_repo_id local/curobo_shape_sorting \\
       --debug_viser \\
@@ -218,7 +232,12 @@ def _configure_env_for_recording(env_cfg: Any) -> Any:
 
 
 def _get_processed_actions(base_env: gym.Env):
-    """Return the concatenated action targets applied during the latest step."""
+    """Return the action targets applied during the latest step, as a CPU numpy copy.
+
+    The copy is not optional: frames wait in ``ClipRecorder``'s buffer for many steps
+    before they are written, and the action manager reuses its target buffers every
+    step, so a view would turn every buffered frame into the newest action.
+    """
     import torch
 
     processed_actions = [
@@ -226,7 +245,8 @@ def _get_processed_actions(base_env: gym.Env):
         for term_name in base_env.action_manager.active_terms
     ]
     assert processed_actions, "The environment has no active action terms"
-    return torch.cat(processed_actions, dim=-1)
+    actions = torch.cat(processed_actions, dim=-1)
+    return actions.detach().to("cpu", copy=True).numpy()
 
 
 def _apply_action_noise(actions, action_noise: float):
@@ -272,6 +292,16 @@ def _is_demonstration_ended(policy: PolicyBase) -> bool:
     return bool(check()) if callable(check) else False
 
 
+def _pop_demo_events(policy: PolicyBase) -> list[str]:
+    """Duck-typed hook for scripted policies that mark clip boundaries.
+
+    Policies used for synthetic demos may implement ``pop_demo_events() -> list[str]``
+    returning "checkpoint" / "cut" (e.g. ``CuroboPolicy``). Others record as before.
+    """
+    pop = getattr(policy, "pop_demo_events", None)
+    return list(pop()) if callable(pop) else []
+
+
 def collect_policy_demos(
     env: gym.Env,
     policy: PolicyBase,
@@ -296,10 +326,15 @@ def collect_policy_demos(
 
     ``should_continue`` is checked between steps (sim still running and no soft-stop).
 
+    Episode boundaries come from the policy's ``pop_demo_events`` (see the module
+    docstring): one rollout can export several clips, and a failed rollout still
+    exports whatever was confirmed before the failure.
+
     Returns:
         (num_successful, num_failed)
     """
     import torch
+    from shape_sorting.demo_clips import ClipRecorder
 
     base_env = env.unwrapped
     assert base_env.num_envs == 1, (
@@ -311,6 +346,7 @@ def collect_policy_demos(
     if not task_description:
         raise ValueError("A task description is required; pass --task_description")
 
+    clips = ClipRecorder(recorder)
     num_successful = 0
     num_failed = 0
     success_step_count = 0
@@ -341,19 +377,22 @@ def collect_policy_demos(
                 break
 
             actions = _apply_action_noise(policy.get_action(env, obs), action_noise)
+            # Events refer to the frames recorded so far, so apply them before this one.
+            for event in _pop_demo_events(policy):
+                {"checkpoint": clips.checkpoint, "cut": clips.cut}[event]()
             recording_observation = recorder.snapshot_observation(obs)
             obs, _, terminated, truncated, _ = env.step(actions)
-            recorder.add_transition(
+            clips.add(
                 recording_observation,
                 _get_processed_actions(base_env),
-                task=task_description,
+                task_description,
             )
 
             if _is_success(base_env, success_term):
                 success_step_count += 1
                 if success_step_count >= num_success_steps:
                     # Do not check soft-stop here: let save_episode finish atomically.
-                    recorder.save_episode()
+                    clips.save()
                     num_successful += 1
                     print(
                         f"Saved successful demo {num_successful}/{generation_num_trials} "
@@ -375,7 +414,7 @@ def collect_policy_demos(
             # Timeout / other truncation or non-success termination → failed attempt.
             # Manager-based envs auto-reset on done; obs is already the next episode.
             if terminated.any() or truncated.any():
-                recorder.discard_episode()
+                kept = clips.cut()
                 num_failed += 1
                 env_ids = (terminated | truncated).nonzero().flatten()
                 policy.reset(env_ids=env_ids)
@@ -383,7 +422,9 @@ def collect_policy_demos(
                 print(
                     f"Failed episode {num_failed}"
                     + (f"/{max_retries}" if max_retries is not None else "")
-                    + f" (successes: {num_successful}/{generation_num_trials})."
+                    + f" (successes: {num_successful}/{generation_num_trials}"
+                    + (f", kept {kept} confirmed frame(s)" if kept else "")
+                    + ")."
                 )
                 continue
 
@@ -391,13 +432,15 @@ def collect_policy_demos(
             # waiting for episode timeout. If success is already holding, keep
             # stepping until num_success_steps exports above.
             if _is_demonstration_ended(policy) and success_step_count == 0:
-                recorder.discard_episode()
+                kept = clips.cut()
                 num_failed += 1
                 print(
                     f"Policy demonstration ended without success — failed episode "
                     f"{num_failed}"
                     + (f"/{max_retries}" if max_retries is not None else "")
-                    + f" (successes: {num_successful}/{generation_num_trials})."
+                    + f" (successes: {num_successful}/{generation_num_trials}"
+                    + (f", kept {kept} confirmed frame(s)" if kept else "")
+                    + ")."
                 )
                 if not should_continue():
                     break
@@ -463,6 +506,7 @@ def main() -> None:
         dataset = None
         num_successful = 0
         num_failed = 0
+        episodes_before = 0
         # Finalize the dataset *before* SimulationAppContext.__exit__: on
         # exceptions that context calls os._exit(1) and skips further cleanup.
         recorder: SO101LeRobotRecorder | None = None
@@ -481,9 +525,10 @@ def main() -> None:
                 streaming_encoding=not args_cli.disable_streaming_encoding,
             )
             dataset = recorder.dataset
+            episodes_before = recorder.num_episodes
             print(
                 f"LeRobot dataset: {recorder.root} "
-                f"(existing episodes: {recorder.num_episodes}, fps: {fps})"
+                f"(existing episodes: {episodes_before}, fps: {fps})"
             )
             num_successful, num_failed = collect_policy_demos(
                 env,
@@ -510,9 +555,11 @@ def main() -> None:
                 )
             env.close()
 
+        # One rollout can export several clips, so count episodes rather than successes.
+        clips_saved = recorder.num_episodes - episodes_before if recorder is not None else 0
         print(
-            f"Done: saved {num_successful} successful demo(s), "
-            f"{num_failed} failed attempt(s) → {args_cli.output_dir}"
+            f"Done: {num_successful} successful rollout(s), {num_failed} failed attempt(s), "
+            f"{clips_saved} episode(s) saved → {args_cli.output_dir}"
         )
 
         if args_cli.push_to_hub:
