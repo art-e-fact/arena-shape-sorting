@@ -5,6 +5,18 @@ shape from ``env.unwrapped.cfg.shapes``. After the last shape: HOME → DONE.
 Plans via ``MotionClient`` (see ``curobo_motion``); collision world sync lives
 there too. Requires ``--embodiment so101_abs_joint``.
 
+**Demo events.** ``pop_demo_events()`` reports "checkpoint" (verified sub-step —
+everything recorded so far is worth keeping) and "cut" (own mistake detected —
+drop back to the last checkpoint and start a new clip here). ``generate_policy_demos``
+turns these into LeRobot episode boundaries; see ``demo_clips``. Other runners can
+ignore them. ``--grasp_perturb_prob`` makes first attempts miss on purpose so the
+recovery gets recorded, and ``--miss_notice_delay_max_steps`` delays noticing so
+recovery clips also start mid-transport.
+
+An insert that cannot be verified now ends the sequence (``DONE``) instead of moving
+on to the next shape: task success is already impossible, and stopping keeps the
+failure out of the recorded clip.
+
 Example::
 
     python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \\
@@ -19,6 +31,7 @@ Example::
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -149,6 +162,34 @@ class CuroboPolicyCfg(PolicyCfg):
     max_grasp_retries: int = 5
     """Max APPROACH→CLOSE attempts per shape before aborting (empty grasps)."""
 
+    grasp_perturb_prob: float = 0.0
+    """Probability that the *first* grasp attempt on a piece is deliberately offset.
+
+    Retries always use the true pose, so the recorded recovery is a correct
+    demonstration. 0 disables perturbation (identical behaviour to before)."""
+
+    grasp_perturb_xy_m: float = 0.02
+    """Half-width of the uniform per-axis XY offset applied to a perturbed grasp [m].
+
+    Calibration knob: too small and every attempt still succeeds, too large and the
+    plan fails outright so the jaw closes in place instead of near-missing the piece.
+    Check the share of perturbed attempts that plan successfully in the logs."""
+
+    insert_settle_steps: int = 15
+    """Extra OPEN-hold steps to wait for the released piece to land inside the box.
+
+    The check runs once as soon as ``open_steps`` elapses, so a clean insert costs no
+    extra frames. Exhausting the window means the insert failed → DONE (~0.5 s at 30 Hz)."""
+
+    miss_notice_delay_max_steps: int = 0
+    """Max steps to keep carrying an empty gripper before noticing a missed grasp.
+
+    The delay is sampled uniformly in ``[0, max]`` per miss, so instant retries are still
+    produced. 0 keeps today's behaviour. A non-zero value makes recovery clips start
+    mid-transport, which is the state a trained policy actually lands in — see
+    ``training_research.local/recovery-gap.md``. Capped by the place trajectory so the
+    gripper never reaches the box empty."""
+
     open_steps: int = 12
     """Sim steps to hold the open jaw before HOME (~0.4 s at the default 30 Hz)."""
 
@@ -204,6 +245,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action: torch.Tensor | None = None
         self._shape_idx = 0
         self._shapes: list[ShapeInfo] | None = None
+        self._demo_events: list[str] = []
+        self._miss_cut_in: int | None = None
 
     # ------------------------------------------------------------------
     # PolicyBase
@@ -221,10 +264,22 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = None
         self._shape_idx = 0
         self._shapes = None
+        # policy_runner never drains these; clear so they cannot leak across episodes.
+        self._demo_events.clear()
+        self._miss_cut_in = None
 
     def is_demonstration_ended(self) -> bool:
         """True after the scripted sequence has finished (HOME → DONE)."""
         return self._phase is Phase.DONE
+
+    def pop_demo_events(self) -> list[str]:
+        """Return and clear the recording events raised during the last ``get_action``.
+
+        "checkpoint" — frames recorded so far are verified, keep them.
+        "cut" — drop back to the last checkpoint; this step starts a new clip.
+        """
+        events, self._demo_events = self._demo_events, []
+        return events
 
     def close(self) -> None:
         if self._motion is not None:
@@ -285,8 +340,16 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 f"{len(self._resolve_shapes(env))} ({shape.name}) "
                 f"grasp attempt {self._grasp_attempts}/{max_attempts}."
             )
-            goal_xyz, goal_quat = self._grasp_pose_in_robot_base(env, device)
+            xy_offset = self._sample_grasp_offset()
+            goal_xyz, goal_quat = self._grasp_pose_in_robot_base(
+                env, device, xy_offset=xy_offset
+            )
             plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="APPROACH")
+            if xy_offset != (0.0, 0.0):
+                print(
+                    f"[CuroboPolicy] APPROACH perturbed by "
+                    f"({xy_offset[0]:+.3f}, {xy_offset[1]:+.3f}) m — plan success={plan.success}."
+                )
             self._traj = plan.waypoints
             self._hold_action = plan.hold_action
             self._step_idx = 0
@@ -320,17 +383,27 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 )
                 self._phase = Phase.DONE
                 return action
+            delay = self._sample_miss_notice_delay()
+            if delay > 0:
+                # Carry the empty gripper for a while before noticing, so the recovery
+                # clip starts mid-transport. ATTACH/PLACE plan fine: attach() fits
+                # spheres on the real piece and the place goal shifts by a few cm.
+                print(
+                    f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
+                    f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp "
+                    f"({self._grasp_attempts}/{max_attempts}), noticing in {delay} step(s)."
+                )
+                self._miss_cut_in = delay
+                self._phase = Phase.ATTACH
+                return action
+
             print(
                 f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
                 f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp "
                 f"({self._grasp_attempts}/{max_attempts}) → APPROACH."
             )
-            self._phase = Phase.APPROACH
-            self._traj = None
-            self._step_idx = 0
-            self._phase_steps = 0
-            motion.clear_last_goal()
-            return self._step_approach(env, device, motion)
+            self._demo_events.append("cut")
+            return self._restart_approach(env, device, motion)
 
         print(f"[CuroboPolicy] CLOSE done (jaw={float(jaw):.3f}) → ATTACH.")
         self._phase = Phase.ATTACH
@@ -356,6 +429,18 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             self._hold_action = plan.hold_action
             self._step_idx = 0
 
+        if self._miss_cut_in is not None:
+            # Cap at the last waypoint so the gripper never reaches OPEN empty-handed.
+            last_waypoint = self._step_idx >= self._traj.shape[0] - 1
+            if self._miss_cut_in <= 0 or last_waypoint:
+                print(
+                    "[CuroboPolicy] PLACE: noticed the empty gripper mid-transport → APPROACH."
+                )
+                self._miss_cut_in = None
+                self._demo_events.append("cut")
+                return self._restart_approach(env, device, motion)
+            self._miss_cut_in -= 1
+
         action = self._playback_traj(device, motion, jaw=self.config.jaw_closed)
         if action is not None:
             return action
@@ -376,6 +461,22 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         if self._phase_steps < max(1, int(self.config.open_steps)):
             return action
 
+        # Hold open until the piece is verifiably in the box. Checkpointing only here
+        # means a saved clip can never end with a failed insert.
+        if not self._piece_inserted(env):
+            settle_deadline = max(1, int(self.config.open_steps)) + max(
+                1, int(self.config.insert_settle_steps)
+            )
+            if self._phase_steps < settle_deadline:
+                return action
+            print(
+                f"[CuroboPolicy] OPEN: {self._current_shape(env).name} is not in the box "
+                f"after {self.config.insert_settle_steps} settle step(s) — insert failed → DONE."
+            )
+            self._phase = Phase.DONE
+            return action
+
+        self._demo_events.append("checkpoint")
         shapes = self._resolve_shapes(env)
         if self._shape_idx + 1 < len(shapes):
             self._shape_idx += 1
@@ -453,6 +554,49 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         action = motion.q_to_action(q, device, jaw=jaw)
         self._hold_action = action
         return action
+
+    def _restart_approach(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        """Abandon the current attempt and re-approach the piece in this same step.
+
+        ``_step_approach`` detaches first, which re-enables the piece's collision
+        obstacle, so a re-plan after a pretended grasp starts from a clean world.
+        """
+        self._phase = Phase.APPROACH
+        self._traj = None
+        self._step_idx = 0
+        self._phase_steps = 0
+        motion.clear_last_goal()
+        return self._step_approach(env, device, motion)
+
+    def _sample_grasp_offset(self) -> tuple[float, float]:
+        """XY offset for this attempt: only the first attempt is ever perturbed."""
+        if self._grasp_attempts != 1:
+            return (0.0, 0.0)
+        if random.random() >= float(self.config.grasp_perturb_prob):
+            return (0.0, 0.0)
+        m = float(self.config.grasp_perturb_xy_m)
+        return (random.uniform(-m, m), random.uniform(-m, m))
+
+    def _sample_miss_notice_delay(self) -> int:
+        """Steps to keep carrying an empty gripper before noticing the miss."""
+        return random.randint(0, max(0, int(self.config.miss_notice_delay_max_steps)))
+
+    def _piece_inserted(self, env: gym.Env) -> bool:
+        """Whether the current piece sits settled inside the box, per the success term."""
+        params = getattr(env.unwrapped.cfg, "piece_in_box_params", None)
+        if params is None:
+            return True  # --goal_object smoke test: no sorting box to check against.
+
+        from isaaclab.managers import SceneEntityCfg
+        from shape_sorting.predicates import objects_centers_inside_aabb
+
+        per_piece = {
+            **params,
+            "object_cfg_list": [SceneEntityCfg(self._current_shape(env).name)],
+        }
+        return bool(objects_centers_inside_aabb(env.unwrapped, **per_piece)[0])
 
     def _hold_with_jaw(self, device: torch.device, jaw: float) -> torch.Tensor:
         assert self._hold_action is not None
@@ -539,12 +683,23 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         return self._resolve_shapes(env)[self._shape_idx]
 
     def _grasp_pose_in_robot_base(
-        self, env: gym.Env, device: torch.device
+        self,
+        env: gym.Env,
+        device: torch.device,
+        *,
+        xy_offset: tuple[float, float] = (0.0, 0.0),
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Grasp EE pose: XY standoff on base→object line, fixed Z."""
+        """Grasp EE pose: XY standoff on base→object line, fixed Z.
+
+        ``xy_offset`` shifts the *target* XY before the standoff and before the pose is
+        built, so the tool yaw stays consistent with the offset position. Offsetting the
+        finished goal instead would ask for a yaw this 5-DoF arm cannot reach.
+        """
         shape = self._current_shape(env)
         obj_b = entity_position_in_robot_base(env, shape.name, device=device)
         xy = obj_b[0:2]
+        if xy_offset != (0.0, 0.0):
+            xy = xy + torch.tensor(xy_offset, device=device, dtype=xy.dtype)
         rho = torch.linalg.norm(xy)
         if float(rho) < 1e-6:
             raise RuntimeError(

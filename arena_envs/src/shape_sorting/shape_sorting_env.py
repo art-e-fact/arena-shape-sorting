@@ -120,6 +120,8 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER
     debug_key_reset: bool = False
     """If True, press R (Isaac window focused) to end the current episode early."""
+    episode_length_s: float = 40.0
+    """Episode timeout in seconds. Failed rollouts truncate when this elapses."""
     control_hz: float = 30.0
     """Env-step rate [Hz], and therefore the fps of datasets recorded from this env.
 
@@ -273,7 +275,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             pick_up_object_list=layout.pieces,
             destination_location_list=[layout.box] * len(layout.pieces),
             background_scene=background,
-            episode_length_s=40.0,
+            episode_length_s=cfg.episode_length_s,
         )
         cavity = layout.box.get_inner_bounding_box()
         task.termination_cfg.success = TerminationTermCfg(
@@ -309,6 +311,10 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             _apply_control_rate(env_cfg, cfg.control_hz)
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
             env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in layout.pieces]
+            # Same params as the success termination, so a policy can verify one piece with
+            # the exact success criterion by overriding ``object_cfg_list``. Recording scripts
+            # null ``terminations.success`` (the attribute), which leaves this dict intact.
+            env_cfg.piece_in_box_params = task.termination_cfg.success.params
             # Send the arm back to its default pose (± noise) on every reset. Nothing else
             # does: Arena's reset events only re-place the box and pieces, so the arm would
             # start the next episode where it dropped the last piece — often intersecting
