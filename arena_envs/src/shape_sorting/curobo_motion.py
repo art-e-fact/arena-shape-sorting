@@ -354,6 +354,31 @@ class MotionClient:
         self._push_debug_joints(q)
         return AttachResult(grasp_offset_ee=grasp_offset, spheres_ee=self._spheres_ee)
 
+    def disable_obstacles(self, entity_name: str) -> list[str]:
+        """Hide ``entity_name`` from collision checking until the next :meth:`detach`.
+
+        Piggybacks on the attach bookkeeping, so the obstacles come back exactly when
+        the grasped object is released. Only valid while something is attached —
+        ``AttachmentManager.detach`` returns early with no attached link and would
+        leave the obstacles off for the rest of the episode.
+        """
+        am = self.planner.attachment_manager
+        if am._attached_link_name is None:
+            raise RuntimeError("disable_obstacles() requires an active attach() to undo it.")
+        names = self._obstacle_names_matching(entity_name)
+        if not names:
+            raise RuntimeError(
+                f"No cuRobo obstacles match '{entity_name}'. "
+                f"Have: {self.planner.scene_collision_checker.get_obstacle_names(0)}"
+            )
+        with torch.inference_mode(False):
+            for name in names:
+                self.planner.scene_collision_checker.enable_obstacle(name, enable=False, env_idx=0)
+        am._disabled_obstacle_names = list(dict.fromkeys([*am._disabled_obstacle_names, *names]))
+        am._disabled_num_envs = 1
+        print(f"[MotionClient] DISABLE obstacles={names}")
+        return names
+
     def detach(self) -> None:
         """Clear attached spheres and re-enable any disabled world obstacles."""
         self.grasp_offset_ee = None
