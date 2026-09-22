@@ -160,6 +160,27 @@ python -m shape_sorting.generate_policy_demos \
 
 Run `python -m shape_sorting.generate_policy_demos --help` for more options.
 
+**How a piece is placed.** The arm stops at a hover pose above the matched hole, lowers
+to the release pose, opens the jaws, and then climbs back out along the same path before
+anything is planned again. The climb-out is the part that matters: planning straight from
+the release pose can start inside the box's collision margin, and cuRobo then fails every
+attempt on the spot — which looks like the arm freezing after a release.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--place_z_offset_m` | `0.02` | Piece-origin height above the hole at release [m]. The piece drops the last few mm and the rim chamfer aligns it. |
+| `--place_hover_z_offset_m` | `0.045` | Piece-origin height at the end of the transport [m]. The gap to the line above is the descent, and the retreat replays it backwards — so this is the climb-out height. |
+| `--grasp_z_m` | `0.145` | Tool height for the grasp [m]. Sets where on the piece the jaws close (default: mid-height). |
+
+Two things were tried here and measured *worse* or neutral, so they are not the defaults —
+`training_research.local/insert-strategy.md` has the numbers. Seating the piece into the
+lid before releasing (`--place_z_offset_m 0.011`) quadrupled failed insertions, because the
+jaws are rigid and jam a slightly misaligned piece where dropping lets gravity correct it.
+Gripping higher (`--grasp_z_m 0.151`) made no measurable difference.
+
+> When comparing two configs, pass `--placement_seed N`. `--seed` does **not** control
+> object placement, so without it the two runs see different scenes.
+
 **Recovery clips.** One rollout is not one episode. The scripted policy marks a
 *checkpoint* after each verified insertion and asks for a *cut* when it catches its
 own mistake; a cut throws away the frames since the last checkpoint, saves the

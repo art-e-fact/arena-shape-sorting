@@ -1,7 +1,10 @@
 """cuRobo pick-and-place smoke-test policy for SO-101.
 
-Sequence per shape: APPROACH → CLOSE → ATTACH → PLACE → OPEN, then the next
-shape from ``env.unwrapped.cfg.shapes``. After the last shape: HOME → DONE.
+Sequence per shape: APPROACH → CLOSE → ATTACH → PLACE → INSERT → OPEN → RETREAT,
+then the next shape from ``env.unwrapped.cfg.shapes``. After the last shape: HOME →
+DONE. PLACE stops at a hover pose above the matched lid hole, INSERT lowers the piece
+to the release pose, and RETREAT replays that descent backwards so the gripper is clear
+of the box before anything is planned again.
 Plans via ``MotionClient`` (see ``curobo_motion``); collision world sync lives
 there too. Requires ``--embodiment so101_abs_joint``.
 
@@ -50,7 +53,6 @@ from shape_sorting.shape_sorting_env import ShapeInfo
 
 # Grasp pose relative to goal_object (robot base frame).
 _GOAL_XY_STANDOFF_M = 0.03
-_GOAL_Z_M = 0.145
 _GOAL_TILT_RAD = 0.0
 _GOAL_ROLL_RAD = 0.0
 
@@ -77,7 +79,9 @@ class Phase(Enum):
     CLOSE = auto()
     ATTACH = auto()
     PLACE = auto()
+    INSERT = auto()
     OPEN = auto()
+    RETREAT = auto()
     HOME = auto()
     DONE = auto()
 
@@ -138,8 +142,38 @@ class CuroboPolicyCfg(PolicyCfg):
     place_object: str = "sorting_box"
     """Unused; place XY/Z come from ``hole_frames`` matching the current shape."""
 
+    grasp_z_m: float = 0.145
+    """Tool-frame height for the grasp pose, in the robot base frame [m].
+
+    Calibration knob: the cuRobo tool frame is the ``gripper`` *link* origin, ~0.105 m
+    above where the jaws actually close, so this decides *where on the piece* the jaws
+    grip. At the default it is the piece's mid-height.
+
+    Gripping higher is tempting — it keeps the jaws further above the lid while the piece
+    is seated — but it measured worse: 0/9 failed insertions here against 3/13 at 0.151
+    over 3 rollouts each (unpaired, so weak — pass ``--placement_seed`` to compare
+    properly), with no clearance problem to fix at either height. The likely mechanism
+    is that the piece hangs lower below the grip and tilts further when its bottom
+    catches the hole rim. Raise it only together with a deeper
+    :attr:`place_z_offset_m`, and re-measure."""
+
     place_z_offset_m: float = 0.02
-    """Object-origin height above the matched lid hole in the robot base frame [m]."""
+    """Object-origin height above the matched lid hole at release [m].
+
+    The piece drops the last few mm and the rim chamfer finishes the alignment. Lowering
+    it until the bottom is *inside* the lid was tried and measured worse: 4 failed
+    insertions in 22 against 1 in 19, paired on ``--placement_seed``. The jaws are rigid
+    and position-controlled, so driving a slightly misaligned piece onto the rim jams it
+    where dropping lets gravity correct it."""
+
+    place_hover_z_offset_m: float = 0.045
+    """Object-origin height above the lid hole at the end of PLACE [m].
+
+    The gap to :attr:`place_z_offset_m` is the INSERT descent, and RETREAT replays it
+    backwards, so this is how far the empty gripper lifts before anything is planned
+    again. That climb-out is the point: planning straight from the release pose can start
+    inside the box's collision margin, and cuRobo then fails every attempt on the spot.
+    Measured free — the 25 mm default matches a no-retreat run release for release."""
 
     position_tolerance: float = 0.015
     """cuRobo position convergence tolerance [m]."""
@@ -247,6 +281,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._shapes: list[ShapeInfo] | None = None
         self._demo_events: list[str] = []
         self._miss_cut_in: int | None = None
+        self._place_roll = _GOAL_ROLL_RAD
 
     # ------------------------------------------------------------------
     # PolicyBase
@@ -267,6 +302,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         # policy_runner never drains these; clear so they cannot leak across episodes.
         self._demo_events.clear()
         self._miss_cut_in = None
+        self._place_roll = _GOAL_ROLL_RAD
 
     def is_demonstration_ended(self) -> bool:
         """True after the scripted sequence has finished (HOME → DONE)."""
@@ -311,8 +347,12 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             action = self._step_attach(env, device, motion)
         elif self._phase is Phase.PLACE:
             action = self._step_place(env, device, motion)
+        elif self._phase is Phase.INSERT:
+            action = self._step_insert(env, device, motion)
         elif self._phase is Phase.OPEN:
             action = self._step_open(env, device, motion)
+        elif self._phase is Phase.RETREAT:
+            action = self._step_retreat(env, device, motion)
         elif self._phase is Phase.HOME:
             action = self._step_home(env, device, motion)
         else:  # DONE
@@ -445,7 +485,41 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         if action is not None:
             return action
 
-        print(f"[CuroboPolicy] PLACE done → OPEN ({self.config.open_steps} steps).")
+        print("[CuroboPolicy] PLACE done (hover) → INSERT.")
+        self._phase = Phase.INSERT
+        self._traj = None
+        self._step_idx = 0
+        return self._step_insert(env, device, motion)
+
+    def _step_insert(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        """Lower the grasped piece from the hover pose to the release pose."""
+        if self._traj is None:
+            # The descent ends a few mm above the lid, well inside the planner's 3 cm
+            # collision activation distance, so with the box on the optimiser buys
+            # clearance by drifting off the hole axis. It is a straight drop from
+            # directly above the hole, so there is nothing to plan around anyway.
+            # ponytail: kept because it is what the measured defaults were tuned with.
+            # The descent no longer reaches into the hole, so this is likely removable —
+            # re-measure insert failures with the box left on before deleting it.
+            motion.disable_obstacles(self._box_entity_name(env))
+            goal_xyz, goal_quat = self._place_pose_in_robot_base(
+                env, device, motion, roll=self._place_roll,
+                z_offset=self.config.place_z_offset_m,
+            )
+            plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="INSERT")
+            if not plan.success:
+                print("[CuroboPolicy] INSERT plan failed — releasing from the hover pose.")
+            self._traj = plan.waypoints
+            self._hold_action = plan.hold_action
+            self._step_idx = 0
+
+        action = self._playback_traj(device, motion, jaw=self.config.jaw_closed)
+        if action is not None:
+            return action
+
+        print(f"[CuroboPolicy] INSERT done → OPEN ({self.config.open_steps} steps).")
         self._phase = Phase.OPEN
         self._phase_steps = 0
         return self._step_open(env, device, motion)
@@ -476,13 +550,35 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             self._phase = Phase.DONE
             return action
 
+        print(
+            f"[CuroboPolicy] OPEN done ({self._current_shape(env).name} is in the box) "
+            f"→ RETREAT."
+        )
+        self._phase = Phase.RETREAT
+        return self._step_retreat(env, device, motion)
+
+    def _step_retreat(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        """Back out of the hole along the INSERT descent, then checkpoint the clip.
+
+        Replay rather than a plan: the open jaws straddle the piece now standing in the
+        hole, so the start state is in collision and cuRobo would refuse to plan out of
+        it — which is how the arm used to sit there until the retries ran out.
+        """
+        action = self._playback_traj_reversed(device, motion, jaw=self.config.jaw_open)
+        if action is not None:
+            return action
+
+        # Checkpoint here rather than at OPEN so a saved clip ends with the gripper
+        # clear of the box, which is also where the next clip has to start from.
         self._demo_events.append("checkpoint")
         shapes = self._resolve_shapes(env)
         if self._shape_idx + 1 < len(shapes):
             self._shape_idx += 1
             nxt = shapes[self._shape_idx]
             print(
-                f"[CuroboPolicy] OPEN done → APPROACH "
+                f"[CuroboPolicy] RETREAT done → APPROACH "
                 f"shape {self._shape_idx + 1}/{len(shapes)} ({nxt.name})."
             )
             self._phase = Phase.APPROACH
@@ -494,13 +590,13 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             return self._step_approach(env, device, motion)
 
         print(
-            f"[CuroboPolicy] OPEN done (all {len(shapes)} shapes) → HOME "
+            f"[CuroboPolicy] RETREAT done (all {len(shapes)} shapes) → HOME "
             f"({self.config.home_steps} steps)."
         )
         self._phase = Phase.HOME
         self._traj = None
         self._step_idx = 0
-        return action
+        return self._step_home(env, device, motion)
 
     def _step_home(
         self, env: gym.Env, device: torch.device, motion: MotionClient
@@ -555,6 +651,20 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = action
         return action
 
+    def _playback_traj_reversed(
+        self, device: torch.device, motion: MotionClient, *, jaw: float
+    ) -> torch.Tensor | None:
+        """Walk the current trajectory back toward its start, or None once past it."""
+        assert self._traj is not None
+        self._step_idx -= 1
+        if self._step_idx < 0:
+            return None
+        q = self._traj[self._step_idx]
+        motion.notify_joint(q)
+        action = motion.q_to_action(q, device, jaw=jaw)
+        self._hold_action = action
+        return action
+
     def _restart_approach(
         self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> torch.Tensor:
@@ -582,6 +692,14 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def _sample_miss_notice_delay(self) -> int:
         """Steps to keep carrying an empty gripper before noticing the miss."""
         return random.randint(0, max(0, int(self.config.miss_notice_delay_max_steps)))
+
+    @staticmethod
+    def _box_entity_name(env: gym.Env) -> str:
+        """Scene entity name of the sorting box, from the success-term container."""
+        params = getattr(env.unwrapped.cfg, "piece_in_box_params", None)
+        if params is None:
+            raise RuntimeError("Sorting box unknown: env.cfg.piece_in_box_params is missing.")
+        return str(params["container_cfg"].name)
 
     def _piece_inserted(self, env: gym.Env) -> bool:
         """Whether the current piece sits settled inside the box, per the success term."""
@@ -710,7 +828,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         return so101_ee_pose_xyzw(
             float(xy_goal[0]),
             float(xy_goal[1]),
-            _GOAL_Z_M,
+            float(self.config.grasp_z_m),
             tilt=_GOAL_TILT_RAD,
             roll=_GOAL_ROLL_RAD,
             device=device,
@@ -803,7 +921,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
         hole_pos, hole_quat = self._hole_pose_in_robot_base(env, device)
         obj_desired = hole_pos.clone()
-        obj_desired[2] = obj_desired[2] + float(self.config.place_z_offset_m)
+        obj_desired[2] = obj_desired[2] + float(self.config.place_hover_z_offset_m)
         _, quat_ee0 = so101_ee_pose_xyzw(
             float(obj_desired[0]),
             float(obj_desired[1]),
@@ -839,8 +957,9 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         motion: MotionClient,
         *,
         roll: float,
+        z_offset: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Place EE so the grasped object origin sits above the lid hole."""
+        """Place EE so the grasped object origin sits ``z_offset`` above the lid hole."""
         from isaaclab.utils.math import quat_apply
 
         if motion.grasp_offset_ee is None:
@@ -850,7 +969,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
         hole_b, _ = self._hole_pose_in_robot_base(env, device)
         obj_desired = hole_b.clone()
-        obj_desired[2] = obj_desired[2] + float(self.config.place_z_offset_m)
+        obj_desired[2] = obj_desired[2] + float(z_offset)
 
         # Seed EE orientation from hole XY + roll, then back out EE position so
         # R @ grasp_offset places the object at obj_desired.
@@ -890,7 +1009,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         last_plan: PlanResult | None = None
         for i, roll in enumerate(rolls):
             goal_xyz, goal_quat = self._place_pose_in_robot_base(
-                env, device, motion, roll=roll
+                env, device, motion, roll=roll,
+                z_offset=self.config.place_hover_z_offset_m,
             )
             plan = motion.plan_to_pose(
                 env,
@@ -900,6 +1020,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 label=f"PLACE[{i + 1}/{len(rolls)} roll={math.degrees(roll):.1f}°]",
             )
             last_plan = plan
+            self._place_roll = roll  # INSERT descends straight down from this pose
             if plan.success:
                 print(
                     f"[CuroboPolicy] PLACE succeeded with roll={math.degrees(roll):.1f}° "
