@@ -126,6 +126,7 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 | `--edge_chamfer` | `0.001` | Piece top/bottom edge chamfer (m) |
 | `--hole_chamfer` | `0.001` | Hole rim lead-in chamfer (m) |
 | `--drop_on_hole_prob` | `0.0` | Probability per episode that one random piece starts dropped onto its own lid hole — tilted, yawed and off-centre — instead of on the table. It falls in, wedges, or lands on the lid: the states a trained policy leaves after letting go in the wrong place. For dataset generation; keep it `0` for evaluation |
+| `--tip_over_prob` | `0.0` | Probability per episode that one random piece starts lying on its side where it stood (never the cube, which on its side is the same cube). The policy picks it up and sets it down standing. For dataset generation; keep it `0` for evaluation |
 | `--control_hz` | `30.0` | Env-step rate (Hz), and the fps of datasets recorded from this env. Physics stays near 200 Hz. Keep the CuroboPolicy pacing flags (`--waypoint_stride`, `--close_steps`, `--open_steps`, `--home_steps`) in proportion, or the demos stretch in wall-clock time instead of getting shorter |
 
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
@@ -159,6 +160,7 @@ python -m shape_sorting.generate_policy_demos \
   shape_sorting_test \
   --embodiment so101_abs_joint \
   --drop_on_hole_prob 0.2 \
+  --tip_over_prob 0.2 \
   --debug_key_reset
 ```
 
@@ -234,18 +236,27 @@ between them. Both cases then lift the piece clear and **re-measure the grasp**,
 is what turns the miss into a correction: the next attempt aims from where the piece
 actually sits in the jaws rather than from where it was when it was first picked up.
 
-Tilt then picks the recovery, because tilt is the one error a 5-DoF wrist cannot re-aim
-away:
+Tilt then picks the recovery, because tilt is the one error re-aiming over the hole does
+not fix:
 
 - **upright** — place again, re-aimed. No parking, no re-grasp.
-- **tilted** — set it down on a free table spot — straight back where it was lifted
-  from if that was the table, otherwise next to the box — pick it up level, place again.
+- **tilted** — set it down standing on a free table spot — straight back where it was
+  lifted from if that was the table, otherwise next to the box — pick it up level, place
+  again.
 
-A piece that is merely tipped — leaning on the rim of its hole, the box or a neighbour —
-or stuck in its hole at any angle, is grasped where it lies, set down, and picked up
-level. A piece lying on its side on the table (tipped past 60°) is left for last and, if
-nothing else changes, ends the rollout: this arm has no way to stand it up yet. The cube
-is the exception — as tall as it is wide, it is simply standing on another face.
+"Standing" is the wrist's job: the grip fixes the piece's axis in the gripper, so
+pitching the wrist by the same angle stands it up, and choosing the piece's yaw keeps
+that pose inside the 5-DoF arm's reach. If it does not plan, the piece is set down
+leaning 30° (it still falls onto its base), and last with the gripper upright, which
+levels anything tipped under ~45° and nothing steeper. A tilted gripper sits ~10 cm
+nearer the robot than the piece it holds, so these set-downs use spots at least 24 cm
+out; next to the table, 60° of wrist tilt is about the limit, so a piece lying flat
+is nearly always set down leaning.
+
+So a piece is grasped where it lies whatever its pose — tipped against the rim of its
+hole, the box or a neighbour, stuck in its hole, or lying on its side on the table — and
+stood back up. Standing on its top counts as standing — every piece is a prism, the same
+solid upside down — and the cube is standing on any face, being as tall as it is wide.
 
 **Pieces that start in the wrong place.** The policy's own inserts almost never leave a
 piece stuck in its hole, because it checks the alignment before letting go. A trained
@@ -255,7 +266,14 @@ and physics decides whether it falls in, catches the rim and wedges, or lands on
 lid. The policy needs nothing special for it: it waits for the piece to land, deals with
 whatever starts on the box first, and takes it out and puts it back like any other
 piece. Nothing about that is a mistake, so nothing is cut — the whole recovery is
-recorded.
+recorded. `--tip_over_prob` does the same for a piece knocked onto its side; those go
+first too, since a lying cylinder brushed by the arm rolls away.
+
+Measured with `--box_mass 1.0`, standing pieces up: `--tip_over_prob 1.0` finished 5/6
+rollouts, `--drop_on_hole_prob 1.0` 7/8 (it was 1/3 before, when a piece that came out of
+its hole tipped past ~45° landed on its side and stayed there). The misses: a lying
+cylinder that rolled out of reach, and a regrasp right against the box wall that closed
+on the wall too and lifted the box.
 
 Pulling a stuck piece out drags the box with it. On five paired rollouts with a piece
 dropped every episode, the default 0.35 kg box drifted 13–21 mm per rollout and 2/5

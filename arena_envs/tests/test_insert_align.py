@@ -23,7 +23,7 @@ from shape_sorting.curobo_policy import (
     Phase,
     alignment_error,
 )
-from shape_sorting.shape_sorting_env import drop_piece_on_hole
+from shape_sorting.shape_sorting_env import drop_piece_on_hole, tip_piece_over
 
 _ORIGIN = torch.tensor([0.4, -0.1, 0.07])
 _IDENTITY = torch.tensor([0.0, 0.0, 0.0, 1.0])
@@ -144,6 +144,26 @@ def test_a_piece_dropped_on_its_hole_is_measured_against_that_hole():
     assert abs(float(pose[2]) - (float(hole[2]) + 0.005 + 0.015)) < 1e-6, "bottom 5 mm over the lid"
     pose, (xy, _, tilt) = drop(math.radians(30.0))
     assert xy < 1e-6 and abs(math.degrees(tilt) - 30.0) < 1e-3, (xy, tilt)
+
+
+def test_a_tipped_over_piece_lies_on_its_side_where_it_stood():
+    import warp as wp
+
+    wp.init()
+    start = torch.cat([torch.tensor([0.3, -0.2, 0.045]), _yaw_quat(20.0)])
+    written = {}
+    piece = SimpleNamespace(
+        data=SimpleNamespace(root_pose_w=wp.from_torch(start[None].clone())),
+        write_root_pose_to_sim=lambda pose, env_ids: written.update(pose=pose[0]),
+        write_root_velocity_to_sim=lambda vel, env_ids: None,
+    )
+    env = SimpleNamespace(scene={"shape_piece_hexagon": piece})
+    tip_piece_over(env, torch.tensor([0]), prob=1.0, pieces={"shape_piece_hexagon": (0.015, 0.019)})
+    pose = written["pose"]
+    _, _, tilt = alignment_error(pose[:3], pose[3:], pose[:3], _IDENTITY, symmetry_order=None)
+    assert abs(math.degrees(tilt) - 90.0) < 1e-3, math.degrees(tilt)
+    assert torch.allclose(pose[:2], start[:2]), "tipped where it stood"
+    assert abs(float(pose[2]) - (0.045 - 0.015 + 0.019 + 0.005)) < 1e-6, "dropped from 5 mm up"
 
 
 if __name__ == "__main__":

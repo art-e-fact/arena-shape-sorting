@@ -105,8 +105,8 @@ def drop_piece_on_hole(
     lid", which is only observable from the policy's logs. A bad release lets go of a
     piece that is upright in the jaws, and the rim is what tips it — so the offset does the
     work and the tilt stays small. Live, spawning pieces tipped 20-40° instead often
-    toppled them onto their side (the round one rolls off the rim), which no recovery
-    here can fix yet.
+    toppled them onto their side (the round one rolls off the rim) — a different state,
+    which :func:`tip_piece_over` produces on purpose.
     """
     import torch
     import warp as wp
@@ -145,6 +145,46 @@ def drop_piece_on_hole(
             f"tilt {math.degrees(tilt):.0f}°, yaw {math.degrees(yaw):+.0f}°, "
             f"off ({dx * 1000:+.0f}, {dy * 1000:+.0f}) mm"
         )
+
+
+def tip_piece_over(
+    env,
+    env_ids,
+    prob: float,
+    pieces: dict[str, tuple[float, float]],
+    gap_m: float = 0.005,
+) -> None:
+    """Reset event: with ``prob``, lay one random piece on its side where it stands.
+
+    ``pieces`` maps each candidate to ``(half_height, radius)``. The piece is turned 90°
+    about a random horizontal axis and dropped from ``gap_m`` above the table, so it
+    settles on whichever side face is nearest — the state a knocked-over piece is in.
+    """
+    import torch
+    import warp as wp
+    from isaaclab.utils.math import quat_from_angle_axis, quat_mul
+
+    if env_ids is None or len(env_ids) == 0 or prob <= 0.0 or not pieces:
+        return
+    for env_id in env_ids.tolist():
+        if float(torch.rand(())) >= prob:
+            continue
+        name = list(pieces)[int(torch.randint(len(pieces), ()))]
+        half_height, radius = pieces[name]
+        piece = env.scene[name]
+        pose = wp.to_torch(piece.data.root_pose_w)[env_id].clone()
+        axis_yaw = (2 * float(torch.rand(())) - 1) * math.pi
+        q_tip = quat_from_angle_axis(
+            torch.tensor([math.pi / 2]), torch.tensor([[math.cos(axis_yaw), math.sin(axis_yaw), 0.0]])
+        )
+        pose[3:7] = quat_mul(q_tip, pose[3:7].cpu().unsqueeze(0))[0].to(pose.device)
+        # Standing, its bottom was half_height below the origin; lying, no point of it is
+        # more than radius below.
+        pose[2] += radius - half_height + gap_m
+        ids = torch.tensor([env_id], device=pose.device)
+        piece.write_root_pose_to_sim(pose.unsqueeze(0), env_ids=ids)
+        piece.write_root_velocity_to_sim(torch.zeros(1, 6, device=pose.device), env_ids=ids)
+        print(f"[tip_piece_over] env {env_id}: {name} laid on its side.")
 
 
 @dataclass(frozen=True)
@@ -212,6 +252,14 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     before letting go. One piece, not each: that is the state being recreated, and live,
     three pieces on the lid at once left the arm — which cannot lift much above the lid
     over the box — no collision-free way to carry any of them out. For dataset
+    generation; keep it 0 for evaluation."""
+    tip_over_prob: float = 0.0
+    """Probability per episode that one random piece starts lying on its side.
+
+    A knocked-over piece is the other state a trained policy leaves behind, and one
+    the scripted policy must stand back up before it fits its hole. Never the cube when
+    it is as tall as it is wide: on its side it is the same cube, standing. Applied
+    before ``drop_on_hole_prob``, so the two never fight over one piece. For dataset
     generation; keep it 0 for evaluation."""
     reset_robot_joint_noise: float = 0.0
     """Uniform ±noise [rad] around the robot's default joint pose at every episode reset.
@@ -413,17 +461,29 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
                     "velocity_range": (0.0, 0.0),
                 },
             )
+            # Both added here, after the placement event composed into env_cfg.events, and
+            # events run in the order they were added: box and pieces have their episode
+            # poses. Half-height and plan radius per piece, from its own bounding box.
+            sizes = {}
+            for piece in layout.pieces:
+                bbox = piece.get_bounding_box()
+                half = (bbox.max_point[0] - bbox.min_point[0]) / 2.0
+                sizes[piece.name] = (float(half[2]), float(math.hypot(half[0], half[1])))
+            if cfg.tip_over_prob > 0.0:
+                tippable = {
+                    name: size for name, size in sizes.items()
+                    if not (name.endswith(ShapeForm.CUBE.value) and cfg.piece_height == cfg.piece_size)
+                }
+                env_cfg.events.tip_piece_over = EventTermCfg(
+                    func=tip_piece_over,
+                    mode="reset",
+                    params={"prob": cfg.tip_over_prob, "pieces": tippable},
+                )
             if cfg.drop_on_hole_prob > 0.0:
-                # Added here, after the placement event composed into env_cfg.events, and
-                # events run in the order they were added: the box has its episode pose.
-                holes = {}
-                for piece, (hx, hy) in zip(layout.pieces, layout.box.hole_centers):
-                    bbox = piece.get_bounding_box()
-                    half = (bbox.max_point[0] - bbox.min_point[0]) / 2.0
-                    holes[piece.name] = (
-                        float(hx), float(hy), float(layout.box.lid_top_z),
-                        float(half[2]), float(math.hypot(half[0], half[1])),
-                    )
+                holes = {
+                    piece.name: (float(hx), float(hy), float(layout.box.lid_top_z), *sizes[piece.name])
+                    for piece, (hx, hy) in zip(layout.pieces, layout.box.hole_centers)
+                }
                 env_cfg.events.drop_piece_on_hole = EventTermCfg(
                     func=drop_piece_on_hole,
                     mode="reset",

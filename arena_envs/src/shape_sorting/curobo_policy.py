@@ -39,12 +39,12 @@ How a piece moves
 ``_decide`` (via :func:`next_goal`)::
 
     holding, upright, tries left      → INSERT   into its hole
-    holding, tilted or out of tries    → PARK     on a free table spot; gravity levels it
+    holding, tipped or out of tries    → PARK     on a free table spot, standing up
     empty,   piece in the box          → finish   "checkpoint", on to the next piece
-    empty,   out of tries, or on its side
-             on the table (past 60°)   → defer    to the back of the queue
+    empty,   out of tries              → defer    to the back of the queue
     empty,   otherwise                 → GRASP    wherever the piece lies now — on the
-                                                  table, on the lid, wedged in its hole
+                                                  table (on its side, too), on the lid,
+                                                  wedged in its hole
 
 Where a mistake is caught, and what follows:
 
@@ -62,7 +62,19 @@ Where a mistake is caught, and what follows:
 is vertical in a grasp pose, so the jaw can close along any yaw. Candidates point it along
 the piece's face normals (:func:`shape_sorting.shape_forms.face_normal_yaws`) — squeezing
 two flats, never two corners — starting from the radial grasp this policy was tuned with,
-so a neighbour sitting on that line no longer blocks the piece.
+so a neighbour sitting on that line no longer blocks the piece. On a tipped piece only the
+faces that stayed vertical count, so a piece lying on its side is squeezed across its
+sides — never on its end faces, which would leave a finger under it once it stands.
+
+**Standing a piece up.** A piece that comes up tipped — pulled out of its hole at an
+angle, or picked up lying on its side — is parked with the wrist pitched so that it
+lands standing (:func:`upright_tilt_rolls`). The grip fixes the piece's axis in the
+gripper; its yaw is free, and choosing it puts the gripper in the arm's plane, where the
+5-DoF wrist can reach — about the pan axis, which is not the base origin. If that tilt
+does not plan it tries leaning 30°, from which the piece still falls onto its base, and
+last the old way: gripper upright, gravity levels anything tipped under ~45°. A tilted
+gripper reaches the table only further out (``_SETDOWN_MIN_REACH_M``), so those spots
+are further out. Bounded like any retry: each go is a grasp.
 
 **Demo events.** ``pop_demo_events()`` reports "checkpoint" (verified sub-step —
 everything recorded so far is worth keeping) and "cut" (own mistake detected — drop back
@@ -131,11 +143,36 @@ _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
 # arm.
 _PARK_RELEASE_CLEARANCE_M = 0.002
 
-# Tipped past this, a piece rests on a side face: no prism here balances on an edge beyond
-# ~45° on its own. Below it, a tipped piece is leaning on something — the rim of its hole,
-# the box, a neighbour — and grasp → park levels it; past it, parking sets it down on the
-# same side face again.
-_LYING_TILT_RAD = math.radians(60.0)
+# A piece let go of with an edge on the table falls onto its base while its centre is over
+# that base: tipped under atan(r/h) ≈ 47° for a 30 mm cylinder or hexagon — which matches
+# what parking did live (47° came up level, 53° and 72° landed on a side). So a piece that
+# cannot be set down upright is set down leaning this much, with margin to spare, which
+# asks that much less of the wrist near the table.
+_SETDOWN_LEAN_RAD = math.radians(30.0)
+# Past this the gripper would point up — into the table, for a set-down.
+_SETDOWN_MAX_TILT_RAD = math.radians(90.0)
+# A tilted gripper sits ~0.1 m nearer the base than the piece it holds, so a set-down
+# needs the spot further out. Offline cuRobo sweep, piece 4 mm over the table: 0.20 m
+# out reaches 30° of tilt, 0.25 m 45-60°, 0.30 m 75°; the same in every direction once
+# the arm plane is taken about the pan axis. Only with the fingertips pointing away
+# from the base — pointing back, nothing past 15° planned — and, past 45°, only with the
+# wrist rolled to about -90..-135° (or +135°): the other rolls put the gripper's bulky
+# side into the table. A piece lying flat can go down on either end, which offers both
+# signs, so it always gets one that works; one held at 45-70° gets whichever its grip
+# gave, and with the wrong one it takes the long way — parked as held, lands lying, is
+# picked up lying and stood up from there.
+_SETDOWN_MIN_REACH_M = 0.24
+# ...and a stood-up piece does not stay where it is let go: it rocks onto its base, toward
+# the robot. Live, 10-14 mm — enough, from a spot behind the box, to end up against the
+# wall, where the next grasp closed on piece and wall together and lifted the box.
+_SETDOWN_DRIFT_M = 0.015
+
+# The shoulder-pan axis in the robot base frame (URDF joint "Rotation"). The arm's plane
+# turns about it, not about the base origin 3 cm away: next to the box that is 7° of
+# azimuth, which an upright gripper absorbs in its roll and a tilted one cannot.
+# ponytail: copied from SO-ARM101-USD.urdf; read it off the cuRobo kinematics if the
+# robot model changes.
+_PAN_AXIS_XY = (0.0207909, -0.0230745)
 
 # Half-height and largest plan radius of a piece at the default 30 mm equal-area size (the
 # cube's half-diagonal, 21.2 mm, is the widest). Used to release a tipped piece high enough
@@ -219,18 +256,20 @@ def _tilt_of(quat_xyzw: torch.Tensor) -> float:
     return math.acos(max(-1.0, min(1.0, float(_rot_from_quat_xyzw(quat_xyzw)[2, 2]))))
 
 
-def cube_standing_quat(quat_xyzw: torch.Tensor) -> torch.Tensor:
-    """The same cube with whichever body axis is nearest vertical relabelled as +Z.
+def standing_quat(quat_xyzw: torch.Tensor, *, any_face: bool = False) -> torch.Tensor:
+    """The same piece with its axis relabelled as +Z the way it points up.
 
-    A cube as tall as it is wide is the same solid on every face, so a cube lying on its
-    side *is* a cube standing up. Everything here reads "up" off a piece's own +Z;
-    relabelling the axes — a symmetry of the solid — lets every rule see it that way,
-    instead of calling it lying down and giving up on it.
+    Everything here reads "up" off a piece's own +Z, but every piece is a prism, the same
+    solid upside down: one standing on its top *is* standing, and fits its hole.
+    Relabelling the axes — a symmetry of the solid — lets every rule see it that way,
+    instead of picking it up only to stand it up again. ``any_face`` picks whichever
+    body axis is nearest vertical instead: a cube as tall as it is wide is the same solid
+    on every face, so on its side it is standing too.
     """
     from isaaclab.utils.math import quat_from_matrix
 
     rot = _rot_from_quat_xyzw(quat_xyzw)
-    i = max(range(3), key=lambda k: abs(float(rot[2, k])))
+    i = max(range(3) if any_face else (2,), key=lambda k: abs(float(rot[2, k])))
     z = rot[:, i] * (1.0 if float(rot[2, i]) >= 0.0 else -1.0)
     x = rot[:, (i + 1) % 3]
     return quat_from_matrix(torch.stack([x, torch.linalg.cross(z, x), z], dim=1).unsqueeze(0))[0]
@@ -300,7 +339,6 @@ def next_goal(
     holding: bool,
     upright: bool = True,
     in_box: bool = False,
-    lying_down: bool = False,
     insert_tries_left: bool = True,
     grasp_tries_left: bool = True,
 ) -> str:
@@ -308,15 +346,15 @@ def next_goal(
 
     Returns "insert", "park", "finish", "defer" or "grasp". A plain function so the whole
     policy can be read off a few lines and tested without a simulator. ``upright`` only
-    matters while holding; ``in_box``, ``lying_down`` and ``grasp_tries_left`` only while
-    empty. ``lying_down`` is a piece tipped over *on the table*: parking cannot level it,
-    so grasping it would only start a grasp → park → grasp cycle.
+    matters while holding; ``in_box`` and ``grasp_tries_left`` only while empty. How a piece
+    lies is not a question: whatever its pose, it is grasped where it lies and, if it comes
+    up tipped, set down standing (``CuroboPolicy._park_candidates``).
     """
     if holding:
         return "insert" if upright and insert_tries_left else "park"
     if in_box:
         return "finish"
-    if lying_down or not (grasp_tries_left and insert_tries_left):
+    if not (grasp_tries_left and insert_tries_left):
         return "defer"
     return "grasp"
 
@@ -354,7 +392,9 @@ def grasp_jaw_yaws(
         slope = [abs(float(n[2])) for n in world]
         limit = max(math.sin(max_tilt), min(slope) + 1e-6)
         yaws = [math.atan2(float(n[1]), float(n[0])) for n, s in zip(world, slope) if s <= limit]
-    return sorted((_wrap_to_pi(y) for y in yaws), key=lambda y: abs(_wrap_to_pi(y - radial_yaw)))
+    # A hexagon on its side shows two sloped faces per side: same yaw, one plan is enough.
+    unique = {round(math.degrees(y)) % 360: _wrap_to_pi(y) for y in yaws}
+    return sorted(unique.values(), key=lambda y: abs(_wrap_to_pi(y - radial_yaw)))
 
 
 def grasp_tool_xy_roll(
@@ -372,6 +412,35 @@ def grasp_tool_xy_roll(
     tool_x = piece_x - standoff * math.cos(jaw_yaw)
     tool_y = piece_y - standoff * math.sin(jaw_yaw)
     return tool_x, tool_y, _wrap_to_pi(jaw_yaw - math.atan2(tool_y, tool_x))
+
+
+def upright_tilt_rolls(
+    piece_z_in_tool: torch.Tensor, *, lean: float = 0.0, max_tilt: float = math.pi / 2.0
+) -> list[tuple[float, float]]:
+    """``(tilt, roll)`` for :func:`so101_ee_pose_xyzw` that stand a held piece up.
+
+    ``piece_z_in_tool`` is the piece's own axis in the tool frame — fixed for as long as
+    the grip holds, so this is a choice of gripper orientation alone. Standing the piece
+    up leaves one freedom, its yaw, and that is exactly what makes it reachable: the yaw
+    is chosen so the gripper axis ends up in the arm's vertical plane, the only place a
+    5-DoF wrist can put it. Solving ``Ry(tilt) Rz(roll) a = +Z`` gives
+    ``tilt = ±acos(a_z)`` with ``roll = -atan2(a_y, a_x)`` for the minus branch (fingertips
+    pointing away from the base) and ``π`` minus that for the plus branch.
+
+    ``lean`` stops that much short, tipping the piece in the arm plane: set down leaning,
+    it still falls onto its base (below ~45° here — see ``_SETDOWN_LEAN_RAD``) and it
+    asks for less wrist tilt near the table. Either end may go down, as every piece is a
+    prism. Least tilt first, fingertips-away first among equals; past ``max_tilt`` the
+    gripper would point up, into the table.
+    """
+    out = []
+    for end in (1.0, -1.0):
+        ax, ay, az = (end * float(v) for v in piece_z_in_tool.reshape(3))
+        tilt = max(0.0, math.acos(max(-1.0, min(1.0, az))) - lean)
+        roll = -math.atan2(ay, ax)
+        if tilt <= max_tilt + 1e-6:
+            out += [(-tilt, _wrap_to_pi(roll)), (tilt, _wrap_to_pi(math.pi + roll))]
+    return sorted(out, key=lambda tr: (round(abs(tr[0]), 6), tr[0] > 0))
 
 
 class BoxFootprint(NamedTuple):
@@ -414,24 +483,26 @@ def park_spots(
     *,
     here_xy: tuple[float, float],
     others_xy: list[tuple[float, float]],
+    min_reach: float = _PARK_MIN_REACH_M,
+    clearance: float = _PARK_CLEARANCE_M,
 ) -> list[tuple[float, float]]:
     """Free table spots to set a piece down on, best first. XY in the robot base frame.
 
     ``here_xy`` — right under the lifted piece — comes first: a piece lifted off the table
     goes straight back where it was, which nothing else can have taken. A piece lifted off
     the lid or out of a hole has no such spot, so a ring around the box follows, nearest
-    first. A spot must stand clear of the box wall and of the other pieces, and off the
-    cramped strip next to the robot's base; whether the arm can reach it is the planner's
-    call.
+    first. A spot must stand ``clearance`` clear of the box wall and of the other pieces,
+    and at least ``min_reach`` out from the robot's base; whether the arm can reach it is
+    the planner's call.
     """
-    clear = _BOX_WALL_M + _PIECE_MAX_RADIUS_M + _PARK_CLEARANCE_M
-    gap = 2.0 * _PIECE_MAX_RADIUS_M + _PARK_CLEARANCE_M
+    clear = _BOX_WALL_M + _PIECE_MAX_RADIUS_M + clearance
+    gap = 2.0 * _PIECE_MAX_RADIUS_M + clearance
     ring = sorted(box.ring(clear), key=lambda p: math.dist(p, here_xy))
     return [
         p
         for p in [tuple(here_xy), *ring]
         if box.outside_by(p) >= clear - 1e-6
-        and math.hypot(*p) >= _PARK_MIN_REACH_M
+        and math.hypot(*p) >= min_reach
         and all(math.dist(p, o) >= gap for o in others_xy)
     ]
 
@@ -443,6 +514,7 @@ def so101_ee_pose_xyzw(
     tilt: float = 0.0,
     roll: float = 0.0,
     *,
+    pivot_xy: tuple[float, float] = (0.0, 0.0),
     device: torch.device | str | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -450,12 +522,17 @@ def so101_ee_pose_xyzw(
 
     Position ``(x, y, z)`` is in the robot base frame. At ``tilt = roll = 0`` the
     tool frame is FLU in the arm plane: X forward, Y left, Z up.
+
+    The arm plane's azimuth is measured about ``pivot_xy``. A tilted pose is reachable
+    only about the real pan axis, :data:`_PAN_AXIS_XY`. At tilt 0 the azimuth merely
+    relabels the roll, and every such pose here is built about the base origin, which is
+    what the grasp and insert rolls were derived and tuned with.
     """
     from isaaclab.utils.math import quat_from_matrix
 
     pos = torch.tensor([x, y, z], device=device, dtype=dtype)
-    rho = math.hypot(x, y)
-    psi = 0.0 if rho < 1e-8 else math.atan2(y, x)
+    rho = math.hypot(x - pivot_xy[0], y - pivot_xy[1])
+    psi = 0.0 if rho < 1e-8 else math.atan2(y - pivot_xy[1], x - pivot_xy[0])
 
     x0 = torch.tensor([math.cos(psi), math.sin(psi), 0.0], device=device, dtype=dtype)
     z0 = torch.tensor([0.0, 0.0, 1.0], device=device, dtype=dtype)
@@ -629,8 +706,8 @@ class CuroboPolicyCfg(PolicyCfg):
 
     Guessed, not derived — a real number would need the rim chamfer, the drop height and
     the piece silhouette. Deliberately generous: a slightly tipped piece still drops in,
-    and the wrist cannot level a piece anyway, so a tight value only buys pointless
-    parking. One number for every question that reduces to it:
+    and levelling one takes a set-down and a regrasp, so a tight value only buys
+    pointless parking. One number for every question that reduces to it:
 
     * end of the insert descent — is the held piece too tilted to let go of?
     * ``_decide`` while holding — can this grasp be re-aimed (under) or must the piece be
@@ -1094,11 +1171,9 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         while todo:
             shape = todo[0]
             in_box = self._piece_inserted(env, require_settled=False)
-            lying = not in_box and self._piece_lying_down(env, device)
             goal = next_goal(
                 holding=False,
                 in_box=in_box,
-                lying_down=lying,
                 insert_tries_left=self._insert_tries_left(),
                 grasp_tries_left=self._grasp_attempts < max(1, int(self.config.max_grasp_retries)),
             )
@@ -1108,7 +1183,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             if goal == "grasp" and self._plan_go(env, device, motion, Goal.GRASP):
                 self._grasp_attempts += 1
                 return self._start_go(env, device, motion)
-            why = "no grasp plan" if goal == "grasp" else ("lying on its side" if lying else "out of tries")
+            why = "no grasp plan" if goal == "grasp" else "out of tries"
             if not self._defer_piece(shape, why):
                 break
 
@@ -1190,12 +1265,17 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 self._todo = list(cfg_shapes)
                 if self._has_box(env):
                     # Whatever starts on the box — stuck in its hole, fallen onto the lid —
-                    # goes first: it is what a policy that let go in the wrong place faces
-                    # next, and left for later it gets knocked about by the other inserts.
-                    # Once, here: re-sorting at every decision would undo deferrals.
+                    # or knocked over goes first: it is what a policy that let go in the
+                    # wrong place faces next, and left for later it gets knocked about by
+                    # the other inserts (live, a lying cylinder brushed by the arm rolled
+                    # out of reach). Once, here: re-sorting at every decision would undo
+                    # deferrals.
                     device = torch.device(env.unwrapped.device)
-                    on_box = {s.name for s in self._todo if self._on_the_box(env, device, s.name)}
-                    self._todo.sort(key=lambda s: s.name not in on_box)
+                    first = {
+                        s.name for s in self._todo
+                        if self._on_the_box(env, device, s.name) or self._tipped(env, device, s.name)
+                    }
+                    self._todo.sort(key=lambda s: s.name not in first)
             elif self.config.goal_object:
                 self._todo = [ShapeInfo(prim_path=f"{{ENV_REGEX_NS}}/{self.config.goal_object}")]
             else:
@@ -1339,43 +1419,78 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def _park_candidates(
         self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> list[Candidate]:
-        """Down onto the best few free table spots (:func:`park_spots`), a few wrist rolls each."""
+        """Down onto the best few free table spots (:func:`park_spots`), standing up.
+
+        A tipped piece is first offered to the wrist: tilted so the piece comes down
+        upright (:func:`upright_tilt_rolls`), then leaning by ``_SETDOWN_LEAN_RAD`` for
+        less wrist tilt. Last, the gripper upright, a few rolls — the piece comes down as
+        tipped as it is held and gravity has to level it, which works under ~45° only.
+        Any orientation at any spot beats the next orientation at the best spot.
+        """
         if not self._has_box(env):
             return []
         box = self._box_footprint(env, device)
         todo = self._pending(env)
         here = entity_position_in_robot_base(env, todo[0].name, device=device)
+        here_xy = (float(here[0]), float(here[1]))
         others = [entity_position_in_robot_base(env, s.name, device=device) for s in todo[1:]]
-        spots = park_spots(
-            box,
-            here_xy=(float(here[0]), float(here[1])),
-            others_xy=[(float(o[0]), float(o[1])) for o in others],
-        )[:_PARK_MAX_SPOTS]
-        # Resting height for an upright piece. Tipped by t, its lowest bottom corner sits
-        # h·cos t + R·sin t below the origin instead of h, so release that much higher —
-        # it then drops a few mm, lands on a face and comes up level, which is what
-        # parking is for.
-        tilt = self._piece_tilt(env, device)
-        h, r = _PIECE_HALF_HEIGHT_M, _PIECE_MAX_RADIUS_M
-        clearance = _PARK_RELEASE_CLEARANCE_M + max(0.0, h * math.cos(tilt) + r * math.sin(tilt) - h)
+        others_xy = [(float(o[0]), float(o[1])) for o in others]
+
+        held_tilt = self._piece_tilt(env, device)
+        ways: list[tuple[str, float, float, float]] = []  # label, tool tilt, roll, piece tilt
+        if held_tilt > float(self.config.insert_align_tilt_tol_rad):
+            a = self._piece_axis_in_tool(env, device, motion)
+            slack = float(self.config.orientation_tolerance)  # what the planner may leave
+            for lean, how in ((0.0, "upright"), (_SETDOWN_LEAN_RAD, "leaning")):
+                ways += [
+                    (f"{how} tilt {math.degrees(t):+.0f}° roll {math.degrees(r):+.0f}°", t, r, lean + slack)
+                    for t, r in upright_tilt_rolls(a, lean=lean, max_tilt=_SETDOWN_MAX_TILT_RAD)
+                    if t < 0.0  # fingertips away from the base: the other way never plans
+                ]
+        ways += [
+            (f"as held roll {math.degrees(r):+.0f}°", _GOAL_TILT_RAD, r, held_tilt)
+            for r in (_GOAL_ROLL_RAD, math.pi / 2.0, -math.pi / 2.0)
+        ]
+
+        h, rad = _PIECE_HALF_HEIGHT_M, _PIECE_MAX_RADIUS_M
         out: list[Candidate] = []
-        for i, (x, y) in enumerate(spots):
-            base = torch.tensor([x, y, box.table_z + h], device=device, dtype=torch.float32)
-            where = "where it was" if i == 0 and (x, y) == (float(here[0]), float(here[1])) else f"spot {i + 1}"
-            out += [
-                (
-                    f"{where} roll {math.degrees(roll):+.0f}°",
+        for label, tool_tilt, roll, piece_tilt in ways:
+            reach, drift = (_SETDOWN_MIN_REACH_M, _SETDOWN_DRIFT_M) if tool_tilt else (_PARK_MIN_REACH_M, 0.0)
+            spots = park_spots(
+                box, here_xy=here_xy, others_xy=others_xy,
+                min_reach=reach, clearance=_PARK_CLEARANCE_M + drift,
+            )
+            # Tipped by t, a piece's lowest bottom corner sits h·cos t + R·sin t below its
+            # origin instead of h: release that much higher, so it drops a few mm onto an
+            # edge and falls level rather than being pressed into the table.
+            lift = _PARK_RELEASE_CLEARANCE_M + max(
+                0.0, h * math.cos(piece_tilt) + rad * math.sin(piece_tilt) - h
+            )
+            for i, (x, y) in enumerate(spots[:_PARK_MAX_SPOTS]):
+                base = torch.tensor([x, y, box.table_z + h], device=device, dtype=torch.float32)
+                where = "where it was" if (x, y) == here_xy else f"spot {i + 1}"
+                out.append((
+                    f"{where} {label}",
                     self._place_pose_in_robot_base(
-                        env, device, motion, roll=roll,
+                        env, device, motion, roll=roll, tilt=tool_tilt,
                         obj_desired=_raised(base, self.config.place_hover_z_offset_m),
                     ),
                     self._place_pose_in_robot_base(
-                        env, device, motion, roll=roll, obj_desired=_raised(base, clearance)
+                        env, device, motion, roll=roll, tilt=tool_tilt,
+                        obj_desired=_raised(base, lift),
                     ),
-                )
-                for roll in (_GOAL_ROLL_RAD, math.pi / 2.0, -math.pi / 2.0)
-            ]
+                ))
         return out
+
+    def _piece_axis_in_tool(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        """The held piece's own +Z in the tool frame — what the grip fixed, measured now."""
+        from isaaclab.utils.math import convert_quat
+
+        ee = motion.ee_pose(motion.planner_joint_state(env, device))
+        rot_ee = _rot_from_quat_xyzw(convert_quat(ee.quaternion.view(-1)[:4], to="xyzw"))
+        return rot_ee.T @ _rot_from_quat_xyzw(self._piece_pose(env, device)[1])[:, 2]
 
     def _face_normals(self, shape: ShapeInfo) -> tuple[float, ...] | None:
         try:
@@ -1460,32 +1575,28 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def _piece_pose(self, env: gym.Env, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
         """The current piece's ``(position (3,), quat_xyzw (4,))`` in the robot base frame.
 
-        The one place piece orientation is read, so that a cube on its side reads as the
-        standing cube it is (:func:`cube_standing_quat`).
+        The one place piece orientation is read, so that a piece on its top — or a cube on
+        its side — reads as the standing piece it is (:func:`standing_quat`).
         """
+        return self._pose_of(env, device, self._current_shape(env).name)
+
+    def _tipped(self, env: gym.Env, device: torch.device, name: str) -> bool:
+        """Tipped past what an insert tolerates — leaning on something, or on its side."""
+        tilt = _tilt_of(self._pose_of(env, device, name)[1])
+        return tilt > float(self.config.insert_align_tilt_tol_rad)
+
+    def _pose_of(
+        self, env: gym.Env, device: torch.device, name: str
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         from isaaclab.utils.math import convert_quat
 
-        shape = self._current_shape(env)
-        pose = entity_pose_in_robot_base(env, shape.name, device=device)
+        pose = entity_pose_in_robot_base(env, name, device=device)
         quat = convert_quat(pose.quaternion.view(-1)[:4], to="xyzw")
-        # ponytail: assumes piece_height == piece_size (the defaults); a taller or flatter
-        # "cube" is not the same solid on its side, and needs this switched off.
-        if shape.name == f"shape_piece_{ShapeForm.CUBE.value}":
-            quat = cube_standing_quat(quat)
-        return pose.position.view(3), quat
-
-    def _piece_lying_down(self, env: gym.Env, device: torch.device) -> bool:
-        """On its side on the table — the one pose parking cannot level (see _LYING_TILT_RAD).
-
-        Anything tipped less is leaning on something — the rim of its hole, the box, a
-        neighbour — and is grasped where it is. So is a steeper piece on the box: stuck
-        deep in its hole, it is worth pulling out and setting down; if it lands on its
-        side, it is on the table and this says so next time. Never true for the cube.
-        """
-        if self._piece_tilt(env, device) <= _LYING_TILT_RAD:
-            return False
-        name = self._current_shape(env).name
-        return not (self._has_box(env) and self._on_the_box(env, device, name))
+        # ponytail: assumes piece_height == piece_size (the defaults) — a taller or flatter
+        # "cube" is not the same solid on its side — and profiles symmetric about their own
+        # X, which every regular form here is; upside down, the others would be mirrored.
+        cube = name == f"shape_piece_{ShapeForm.CUBE.value}"
+        return pose.position.view(3), standing_quat(quat, any_face=cube)
 
     def _on_the_box(self, env: gym.Env, device: torch.device, name: str) -> bool:
         """Over the cavity's footprint: on the lid, stuck in a hole, or already in the box."""
@@ -1743,11 +1854,12 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         *,
         roll: float,
         obj_desired: torch.Tensor,
+        tilt: float = _GOAL_TILT_RAD,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Place EE so the grasped object origin lands on ``obj_desired`` (robot base).
 
-        Target-agnostic: ``_place_goal`` decides whether that point is above a lid hole
-        or above the piece's parking spot on the table.
+        Target-agnostic: the caller decides whether that point is above a lid hole or
+        above a spot on the table.
         """
         from isaaclab.utils.math import quat_apply
 
@@ -1756,27 +1868,13 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 "CuroboPolicy: placing needs a grasp offset — attach() the held piece first."
             )
 
-        # Seed EE orientation from the goal XY + roll, then back out EE position so
-        # R @ grasp_offset places the object at obj_desired.
-        _, quat_seed = so101_ee_pose_xyzw(
-            float(obj_desired[0]),
-            float(obj_desired[1]),
-            float(obj_desired[2]),
-            tilt=_GOAL_TILT_RAD,
-            roll=roll,
-            device=device,
-        )
-        offset_b = quat_apply(
-            quat_seed.unsqueeze(0),
-            motion.grasp_offset_ee.to(device=device, dtype=torch.float32).unsqueeze(0),
-        )[0]
-        ee_pos = obj_desired - offset_b
-
-        return so101_ee_pose_xyzw(
-            float(ee_pos[0]),
-            float(ee_pos[1]),
-            float(ee_pos[2]),
-            tilt=_GOAL_TILT_RAD,
-            roll=roll,
-            device=device,
-        )
+        # The tool's yaw follows the tool's own XY, which depends on where the offset puts
+        # it: iterate. Once was enough for an upright tool (a few mm of slack), not for a
+        # tilted one, whose ~0.1 m offset swings out sideways.
+        offset = motion.grasp_offset_ee.to(device=device, dtype=torch.float32).unsqueeze(0)
+        pivot = _PAN_AXIS_XY if tilt else (0.0, 0.0)  # see so101_ee_pose_xyzw
+        ee_pos = obj_desired
+        for _ in range(4):
+            _, quat = so101_ee_pose_xyzw(*ee_pos.tolist(), tilt=tilt, roll=roll, pivot_xy=pivot, device=device)
+            ee_pos = obj_desired - quat_apply(quat.unsqueeze(0), offset)[0]
+        return so101_ee_pose_xyzw(*ee_pos.tolist(), tilt=tilt, roll=roll, pivot_xy=pivot, device=device)

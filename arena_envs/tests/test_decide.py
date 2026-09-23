@@ -33,11 +33,13 @@ from shape_sorting.curobo_policy import (
     Phase,
     _rot_from_quat_xyzw,
     _tilt_of,
-    cube_standing_quat,
     grasp_jaw_yaws,
     grasp_tool_xy_roll,
     next_goal,
     park_spots,
+    so101_ee_pose_xyzw,
+    standing_quat,
+    upright_tilt_rolls,
 )
 from shape_sorting.shape_forms import ShapeForm, face_normal_yaws
 from shape_sorting.shape_sorting_env import ShapeInfo
@@ -167,6 +169,7 @@ def make(pieces=(CUBE, CYL, HEX), cfg=None, box=True, **rules):
     policy._piece_tilt = lambda env, device: world.tilt[current()]
     policy._world_still = lambda env: bool(world.ask("still", policy._pending(env)[0].name))
     policy._on_the_box = lambda env, device, name: name in world.on_box | world.in_box
+    policy._tipped = lambda env, device, name: world.tilt[name] > policy.config.insert_align_tilt_tol_rad
     policy._insert_misaligned = lambda env, device: (
         None if world.ask("aligned", current()) else "misaligned"
     )
@@ -250,14 +253,26 @@ def test_tipped_cube_only_offers_faces_that_stayed_vertical():
 def test_a_cube_on_its_side_reads_as_a_standing_cube():
     # 30 mm tall and 30 mm wide: on any face it is the same solid, and fits its hole.
     for deg in (90.0, -90.0, 180.0):
-        assert _tilt_of(cube_standing_quat(_tilt_quat(deg))) < 1e-4, deg
-    assert abs(math.degrees(_tilt_of(cube_standing_quat(_tilt_quat(30.0)))) - 30.0) < 1e-3
+        assert _tilt_of(standing_quat(_tilt_quat(deg), any_face=True)) < 1e-4, deg
+    assert abs(math.degrees(_tilt_of(standing_quat(_tilt_quat(30.0), any_face=True))) - 30.0) < 1e-3
     # Only a relabelling of its own axes — the solid itself must not turn.
     q = torch.tensor([0.3, -0.5, 0.2, 0.8])
     q = q / q.norm()
-    relabel = _rot_from_quat_xyzw(q).T @ _rot_from_quat_xyzw(cube_standing_quat(q))
-    assert torch.allclose(relabel.abs().sum(0), torch.ones(3), atol=1e-4), relabel
-    assert abs(float(torch.linalg.det(relabel)) - 1.0) < 1e-4
+    for any_face in (True, False):
+        relabel = _rot_from_quat_xyzw(q).T @ _rot_from_quat_xyzw(standing_quat(q, any_face=any_face))
+        assert torch.allclose(relabel.abs().sum(0), torch.ones(3), atol=1e-4), relabel
+        assert abs(float(torch.linalg.det(relabel)) - 1.0) < 1e-4
+
+
+def test_a_prism_on_its_top_reads_as_standing_but_on_its_side_does_not():
+    # Live: a hexagon stood back up landed on its other end, read "tilted 179°", and was
+    # parked again and again. Upside down it is the same prism, and fits its hole.
+    assert _tilt_of(standing_quat(_tilt_quat(179.0))) < math.radians(1.01)
+    assert abs(math.degrees(_tilt_of(standing_quat(_tilt_quat(90.0)))) - 90.0) < 1e-3
+    assert abs(math.degrees(_tilt_of(standing_quat(_tilt_quat(150.0)))) - 30.0) < 1e-3
+    # Yaw is read off the body X axis, which the flip keeps.
+    rot = _rot_from_quat_xyzw(standing_quat(torch.tensor([1.0, 0.0, 0.0, 0.0])))  # 180° about X
+    assert torch.allclose(rot[:, 0], torch.tensor([1.0, 0.0, 0.0]), atol=1e-6), rot
 
 
 def test_round_piece_gets_four_yaws_radial_first():
@@ -407,7 +422,7 @@ def test_giving_up_on_a_tried_piece_is_cut_but_an_unplannable_one_is_not():
     assert "cut" not in kinds(events), "nothing was tried, so nothing to drop"
 
 
-def test_piece_lying_on_its_side_is_deferred_not_cycled():
+def test_piece_that_keeps_landing_on_its_side_is_retried_within_the_grasp_budget():
     policy, _, env, motion = make(
         drops_in=lambda piece, n: piece != CUBE,
         wedge_tilt=lambda piece, n: math.radians(40),
@@ -415,8 +430,10 @@ def test_piece_lying_on_its_side_is_deferred_not_cycled():
     )
     run(policy, env)
     parks = [label for label, ok in motion.plans if label.startswith(f"PARK {CUBE}") and ok]
-    # One park per round (it lands on its side and is left alone), not one per grasp try.
-    assert 0 < len({label for label in parks}) and len(parks) <= 2 * 3, parks
+    # Lying down is no reason to give up any more — but each try is a grasp, and the
+    # grasp budget per round still bounds them. Two rounds: before and after the others.
+    budget = policy.config.max_grasp_retries
+    assert budget < len(parks) // 2 <= 2 * budget, len(parks) // 2
 
 
 def test_slip_after_an_insert_recovery_is_cut_too():
@@ -482,8 +499,20 @@ def test_piece_that_starts_in_the_box_is_simply_finished():
     assert kinds(events) == ["checkpoint"] * 3
 
 
+def test_a_piece_lying_on_its_side_is_picked_up_and_stood_up_first():
+    # Not a mistake of this episode, so nothing to cut: grasp it lying, set it down
+    # standing, grasp it again and insert it — before the others, whose inserts would
+    # otherwise brush it (live, a lying cylinder rolled out of reach that way).
+    policy, world, env, motion = make()
+    world.tilt[HEX] = math.radians(90)
+    _, events = run(policy, env)
+    assert world.in_box == {CUBE, CYL, HEX}
+    assert motion.plans[0][0].startswith(f"GRASP {HEX}"), motion.plans[0]
+    assert any(label.startswith(f"PARK {HEX}") for label, _ in motion.plans)
+    assert kinds(events) == ["checkpoint"] * 3
+
+
 def test_a_piece_stuck_steeply_in_its_hole_is_still_tried():
-    # Tipped past 60° but on the box: wedged deep in its hole, not lying on the table.
     policy, world, env, motion = make()
     world.tilt[HEX] = math.radians(70)
     world.on_box.add(HEX)
@@ -523,7 +552,7 @@ def test_the_real_still_check_skips_the_held_piece_but_not_the_box():
         return SimpleNamespace(unwrapped=SimpleNamespace(scene=scene, cfg=cfg, device="cpu"))
 
     policy = CuroboPolicy(CuroboPolicyCfg())
-    policy._on_the_box = lambda *a: False  # queue order is not what this checks
+    policy._on_the_box = policy._tipped = lambda *a: False  # queue order is not what this checks
     assert not policy._world_still(env()), "the current piece is moving"
     policy._jaw_cmd = policy.config.jaw_closed
     assert policy._world_still(env()), "...because it is in the jaws, moving with the arm"
@@ -553,6 +582,43 @@ def test_a_piece_lifted_out_of_its_hole_goes_next_to_the_box_clear_of_everything
         assert math.dist(p, neighbour) >= 2 * _PIECE_MAX_RADIUS_M, "not on top of the neighbour"
     dists = [math.dist(p, here) for p in spots]
     assert dists == sorted(dists), "nearest first: shortest carry"
+    # A stood-up piece rocks toward the robot after release: those spots keep more room.
+    roomy = park_spots(_BOX, here_xy=here, others_xy=[neighbour], clearance=0.025)
+    assert roomy and all(_BOX.outside_by(p) >= 0.055 - 1e-6 for p in roomy)
+
+
+def test_a_held_piece_is_set_down_standing_with_a_reachable_wrist():
+    # The grip fixes the piece's axis in the tool frame; any (tilt, roll) returned must
+    # stand it up — to within the lean — through so101_ee_pose_xyzw, i.e. a pose the
+    # 5-DoF arm can actually take, wherever on the table that is.
+    gen = torch.Generator().manual_seed(0)
+    rng = random.Random(0)
+    for _ in range(200):
+        a = torch.randn(3, generator=gen)
+        a = a / a.norm()
+        for lean in (0.0, math.radians(25)):
+            ways = upright_tilt_rolls(a, lean=lean)
+            assert ways and all(abs(t) <= math.pi / 2 + 1e-6 for t, _ in ways)
+            assert [abs(t) for t, _ in ways] == sorted(abs(t) for t, _ in ways), "least tilt first"
+            for t, r in ways:
+                _, q = so101_ee_pose_xyzw(rng.uniform(-0.3, 0.3), rng.uniform(-0.3, 0.3), 0.1, tilt=t, roll=r)
+                up = abs(float((_rot_from_quat_xyzw(q) @ a)[2]))  # either end down
+                assert math.acos(min(1.0, up)) <= lean + 1e-3, (a, lean, t, r)
+
+    # Pulled out of its hole tipped 72° about the jaw axis: pitch the wrist 72°, fingertips
+    # away from the base, jaws turned tangential so the pitch turns the piece about them.
+    t, r = upright_tilt_rolls(torch.tensor([0.0, math.sin(math.radians(72)), math.cos(math.radians(72))]))[0]
+    assert abs(math.degrees(t) + 72) < 1e-3 and abs(abs(math.degrees(r)) - 90) < 1e-3, (t, r)
+    # Already upright in the jaws: the gripper stays vertical.
+    assert abs(upright_tilt_rolls(torch.tensor([0.0, 0.0, 1.0]))[0][0]) < 1e-9
+
+
+def test_a_lying_hexagon_is_gripped_across_its_sides_once_per_side():
+    # Squeezing its end faces would leave a finger under it once it stands. Across, the
+    # two sloped faces per side are one jaw direction, and one plan is enough for it.
+    yaws = grasp_jaw_yaws(_tilt_quat(90), face_normal_yaws(ShapeForm.HEXAGON), radial_yaw=0.0,
+                          max_tilt=math.radians(20))
+    assert sorted(round(math.degrees(y)) % 360 for y in yaws) == [0, 180], yaws
 
 
 # --- fuzz: throw every failure at it at once ------------------------------------------
