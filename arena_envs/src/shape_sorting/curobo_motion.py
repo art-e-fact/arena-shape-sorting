@@ -7,6 +7,8 @@ receives world / joint / attach updates (Viser today; Rerun later).
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -235,8 +237,14 @@ class MotionClient:
         goal_quat_xyzw: torch.Tensor,
         *,
         label: str = "plan",
+        start: torch.Tensor | None = None,
     ) -> PlanResult:
-        """Plan EE motion to ``goal`` (robot base). Syncs collision world first."""
+        """Plan EE motion to ``goal`` (robot base). Syncs collision world first.
+
+        ``start`` is a planner-order joint vector to plan from instead of the live robot —
+        the last waypoint of a plan that has not been played yet, so two legs of one
+        approach can be planned (and rejected) together.
+        """
         from curobo.types import GoalToolPose
         from isaaclab.utils.math import convert_quat
 
@@ -251,7 +259,11 @@ class MotionClient:
             goal_xyz = goal_xyz.detach().clone()
             goal_quat_xyzw = goal_quat_xyzw.detach().clone()
             goal_quat_wxyz = convert_quat(goal_quat_xyzw, to="wxyz").clone()
-            q_start = self.planner_joint_state(env, device)
+            q_start = (
+                self.planner_joint_state(env, device)
+                if start is None
+                else self._as_planner_joint_state(start)
+            )
 
             self.debug.set_goal(
                 goal_xyz.detach().cpu().tolist(),
@@ -354,30 +366,45 @@ class MotionClient:
         self._push_debug_joints(q)
         return AttachResult(grasp_offset_ee=grasp_offset, spheres_ee=self._spheres_ee)
 
-    def disable_obstacles(self, entity_name: str) -> list[str]:
-        """Hide ``entity_name`` from collision checking until the next :meth:`detach`.
+    @contextmanager
+    def obstacles_hidden(self, entity_name: str | None) -> Iterator[list[str]]:
+        """Hide ``entity_name`` from collision checking for the plans made inside the block.
 
-        Piggybacks on the attach bookkeeping, so the obstacles come back exactly when
-        the grasped object is released. Only valid while something is attached —
-        ``AttachmentManager.detach`` returns early with no attached link and would
-        leave the obstacles off for the rest of the episode.
+        Restored on exit however the block ends, so a hidden obstacle cannot leak into a
+        later plan — the failure mode of the old disable/enable pair, where re-enabling was
+        a separate call that one path forgot. ``None`` hides nothing, which keeps call sites
+        free of branches.
+
+        The names also go on the attachment manager's disabled list because
+        :meth:`sync_world`, which every plan runs first, re-applies that list after the pose
+        sync resets enable flags.
         """
-        am = self.planner.attachment_manager
-        if am._attached_link_name is None:
-            raise RuntimeError("disable_obstacles() requires an active attach() to undo it.")
-        names = self._obstacle_names_matching(entity_name)
-        if not names:
+        if entity_name is None:
+            yield []
+            return
+        matching = self._obstacle_names_matching(entity_name)
+        if not matching:
             raise RuntimeError(
                 f"No cuRobo obstacles match '{entity_name}'. "
                 f"Have: {self.planner.scene_collision_checker.get_obstacle_names(0)}"
             )
+        am = self.planner.attachment_manager
+        checker = self.planner.scene_collision_checker
+        names = [n for n in matching if n not in am._disabled_obstacle_names]
         with torch.inference_mode(False):
             for name in names:
-                self.planner.scene_collision_checker.enable_obstacle(name, enable=False, env_idx=0)
-        am._disabled_obstacle_names = list(dict.fromkeys([*am._disabled_obstacle_names, *names]))
+                checker.enable_obstacle(name, enable=False, env_idx=0)
+        am._disabled_obstacle_names = [*am._disabled_obstacle_names, *names]
         am._disabled_num_envs = 1
-        print(f"[MotionClient] DISABLE obstacles={names}")
-        return names
+        try:
+            yield names
+        finally:
+            with torch.inference_mode(False):
+                for name in names:
+                    checker.enable_obstacle(name, enable=True, env_idx=0)
+            am._disabled_obstacle_names = [
+                n for n in am._disabled_obstacle_names if n not in names
+            ]
 
     def detach(self) -> None:
         """Clear attached spheres and re-enable any disabled world obstacles."""

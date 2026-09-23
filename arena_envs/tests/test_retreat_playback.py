@@ -1,6 +1,6 @@
 # Copyright (c) 2026, The Isaac Lab Arena Project Developers.
 # SPDX-License-Identifier: Apache-2.0
-"""Checks that RETREAT retraces the INSERT descent. Run: python test_retreat_playback.py
+"""Checks that UP retraces a GO descent backwards. Run: python test_retreat_playback.py
 
 Needs torch + arena_so101 (the Arena venv), but no Isaac Sim app.
 """
@@ -56,11 +56,11 @@ def test_retreat_ends_back_at_the_hover_pose():
     policy = _policy_with_traj([10.0, 11.0, 12.0])
     _play(policy, forward=True, jaw=-0.17)
     _play(policy, forward=False, jaw=1.74)
-    assert float(policy._hold_action[0]) == 10.0, "hover pose is where HOME interpolates from"
+    assert float(policy._hold_action[0]) == 10.0, "UP must end back at the hover pose"
 
 
 def test_failed_insert_plan_still_round_trips():
-    # A failed plan is a single hold waypoint; retreat must not walk off the end.
+    # A one-waypoint trajectory; replaying it backwards must not walk off the end.
     policy = _policy_with_traj([10.0])
     assert _play(policy, forward=True, jaw=-0.17) == [10.0]
     assert _play(policy, forward=False, jaw=1.74) == [10.0]

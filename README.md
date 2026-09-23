@@ -121,9 +121,11 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 | `--piece_size` | `0.03` | Equal-area reference square side length (m) |
 | `--piece_height` | `0.03` | Piece extrusion height (m) |
 | `--box_height` | `0.04` | Sorting box height (m) |
+| `--box_mass` | `0.35` | Sorting box mass (kg). Light enough that pulling a wedged piece out drags it; see "Pieces that start in the wrong place" for measurements |
 | `--clearance` | `0.003` | Hole clearance around each piece (m) |
 | `--edge_chamfer` | `0.001` | Piece top/bottom edge chamfer (m) |
 | `--hole_chamfer` | `0.001` | Hole rim lead-in chamfer (m) |
+| `--drop_on_hole_prob` | `0.0` | Probability per episode that one random piece starts dropped onto its own lid hole — tilted, yawed and off-centre — instead of on the table. It falls in, wedges, or lands on the lid: the states a trained policy leaves after letting go in the wrong place. For dataset generation; keep it `0` for evaluation |
 | `--control_hz` | `30.0` | Env-step rate (Hz), and the fps of datasets recorded from this env. Physics stays near 200 Hz. Keep the CuroboPolicy pacing flags (`--waypoint_stride`, `--close_steps`, `--open_steps`, `--home_steps`) in proportion, or the demos stretch in wall-clock time instead of getting shorter |
 
 `--enable_cameras` is a shared Arena flag (pass it before `shape_sorting_test`), not an env-subcommand option.
@@ -153,8 +155,10 @@ python -m shape_sorting.generate_policy_demos \
   --action_noise 0.01 \
   --grasp_perturb_prob 0.3 \
   --miss_notice_delay_max_steps 45 \
+  --place_perturb_prob 0.3 \
   shape_sorting_test \
   --embodiment so101_abs_joint \
+  --drop_on_hole_prob 0.2 \
   --debug_key_reset
 ```
 
@@ -166,17 +170,30 @@ anything is planned again. The climb-out is the part that matters: planning stra
 the release pose can start inside the box's collision margin, and cuRobo then fails every
 attempt on the spot — which looks like the arm freezing after a release.
 
+The hole frame sits on the lid top, so with the default box (`0.04` tall) and pieces
+(`0.03` tall) the descent closes 25 of the 30 mm between the two poses, and the piece is
+released with its bottom still about **5 mm above the lid**:
+
+| | piece origin above the hole frame | piece bottom vs. lid top |
+|---|---|---|
+| end of the transport | +45 mm | 30 mm clear |
+| end of the descent (release) | +20 mm | 5 mm clear |
+
+That remaining gap is the likeliest reason a piece sometimes fails to fall in.
+`--place_z_offset_m 0.015` puts the bottom exactly on the lid, below that it is already
+inside the hole at release.
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--place_z_offset_m` | `0.02` | Piece-origin height above the hole at release [m]. The piece drops the last few mm and the rim chamfer aligns it. |
 | `--place_hover_z_offset_m` | `0.045` | Piece-origin height at the end of the transport [m]. The gap to the line above is the descent, and the retreat replays it backwards — so this is the climb-out height. |
-| `--grasp_z_m` | `0.145` | Tool height for the grasp [m]. Sets where on the piece the jaws close (default: mid-height). |
+| `--grasp_height_m` | `0.10` | Tool height above the piece's origin for the grasp [m]. Sets where on the piece the jaws close (default: fingertips 5 mm below its centre). Measured from the piece's live pose, and raised as needed to keep the fingertips off the lid. Replaces the absolute `--grasp_z_m 0.145`. |
 
 Two things were tried here and measured *worse* or neutral, so they are not the defaults —
 `training_research.local/insert-strategy.md` has the numbers. Seating the piece into the
 lid before releasing (`--place_z_offset_m 0.011`) quadrupled failed insertions, because the
 jaws are rigid and jam a slightly misaligned piece where dropping lets gravity correct it.
-Gripping higher (`--grasp_z_m 0.151`) made no measurable difference.
+Gripping higher (`--grasp_height_m 0.106`) made no measurable difference.
 
 > When comparing two configs, pass `--placement_seed N`. `--seed` does **not** control
 > object placement, so without it the two runs see different scenes.
@@ -188,15 +205,82 @@ confirmed ones as an episode, and starts a new episode at the failure state. A
 recovery episode therefore opens on "gripper closed on nothing" and its actions are
 the fix, so the dataset teaches the recovery without teaching the mistake.
 
-The two flags above are what create those failures on purpose, since cuRobo plans
-from ground truth and almost never misses on its own:
+**How the policy is structured.** Every motion is one of three: *go* (a planned move to
+a hover pose, then a straight descent to contact), *jaw* (open or close in place) and
+*up* (replay the descent backwards). Between motions, one decision function looks at the
+world — is something in the jaws, is the piece in the box, is it tilted — and picks the
+next goal: insert it, park it, grasp it, move on to the next piece, or put this one to
+the back of the queue. The arm only ever plans from a hover pose, never from one with
+its fingers around something, which is what used to freeze it after a release or a
+missed grasp. The rules behind this are written at the top of
+[`curobo_policy.py`](arena_envs/src/shape_sorting/curobo_policy.py).
+
+**Grasping.** The wrist rolls about the gripper's own axis, which is vertical over a
+piece, so the jaws can close along any direction. The policy lines them up with the
+piece's flat faces — never two corners — and tries each such direction, starting from
+the straight base-to-piece line the grasp was tuned with. A piece whose every direction
+is blocked (say, squeezed between two neighbours) goes to the back of the queue and is
+tried again once another piece has been moved; a full round with no progress ends the
+rollout instead of freezing it.
+
+A **missed grasp** is noticed when the jaw closes all the way on nothing; the arm backs
+off and re-approaches the piece.
+
+A **failed insertion** is noticed either just before the jaws open — the held piece is
+measured against its hole for XY offset, yaw (folded into the piece's own symmetry) and
+tilt — or afterwards, when it never turns up inside the cavity. In the second case the
+arm closes the jaws again first, which needs no planning because the piece is still
+between them. Both cases then lift the piece clear and **re-measure the grasp**, which
+is what turns the miss into a correction: the next attempt aims from where the piece
+actually sits in the jaws rather than from where it was when it was first picked up.
+
+Tilt then picks the recovery, because tilt is the one error a 5-DoF wrist cannot re-aim
+away:
+
+- **upright** — place again, re-aimed. No parking, no re-grasp.
+- **tilted** — set it down on a free table spot — straight back where it was lifted
+  from if that was the table, otherwise next to the box — pick it up level, place again.
+
+A piece that is merely tipped — leaning on the rim of its hole, the box or a neighbour —
+or stuck in its hole at any angle, is grasped where it lies, set down, and picked up
+level. A piece lying on its side on the table (tipped past 60°) is left for last and, if
+nothing else changes, ends the rollout: this arm has no way to stand it up yet. The cube
+is the exception — as tall as it is wide, it is simply standing on another face.
+
+**Pieces that start in the wrong place.** The policy's own inserts almost never leave a
+piece stuck in its hole, because it checks the alignment before letting go. A trained
+policy does leave pieces like that. `--drop_on_hole_prob` (an env flag) recreates that
+state at reset instead: one piece is let go of over its own hole, off-centre and yawed,
+and physics decides whether it falls in, catches the rim and wedges, or lands on the
+lid. The policy needs nothing special for it: it waits for the piece to land, deals with
+whatever starts on the box first, and takes it out and puts it back like any other
+piece. Nothing about that is a mistake, so nothing is cut — the whole recovery is
+recorded.
+
+Pulling a stuck piece out drags the box with it. On five paired rollouts with a piece
+dropped every episode, the default 0.35 kg box drifted 13–21 mm per rollout and 2/5
+rollouts finished; at `--box_mass 1.0` it drifted 0–18 mm and 4/5 finished — partly
+because a light box also shifts when the dropped piece hits its rim, rolling the round
+piece off. Whatever you pick, use the same value for generation and evaluation.
+
+The flags below create these failures on purpose, since cuRobo plans from ground truth
+and almost never misses on its own:
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--grasp_perturb_prob` | `0` | Probability that the **first** grasp attempt on a piece is offset. Retries use the true pose, so the recorded recovery is correct. |
 | `--grasp_perturb_xy_m` | `0.02` | Half-width of the uniform XY offset [m]. Too large and the plan fails outright instead of near-missing — check how many perturbed attempts still plan in the logs. |
 | `--miss_notice_delay_max_steps` | `0` | Max steps to carry an empty gripper before noticing, sampled per miss. Non-zero also covers "empty gripper halfway to the bin", which is where a trained policy actually fails. 45 ≈ 1.5 s at 30 fps. |
-| `--insert_settle_steps` | `15` | Extra open-gripper steps to wait for the piece to land before declaring the insertion failed (which ends the rollout). |
+| `--insert_settle_steps` | `15` | Extra open-gripper steps to wait for the piece to land before declaring the insertion failed. A piece that is inside the cavity but still bouncing counts as a success. |
+| `--place_perturb_prob` | `0` | Probability that a piece's **first** placement is misaligned on purpose. Retries use the true pose. |
+| `--place_perturb_xy_m` | `0.012` | Half-width of the uniform XY offset on a perturbed placement [m]. |
+| `--place_perturb_yaw_rad` | `0.79` (45°) | Half-width of the uniform yaw offset [rad]. Yaw is the error a trained policy actually makes on non-circular pieces, and a cube arriving 45° off its hole is the recovery it most needs to have seen. |
+| `--max_insert_retries` | `2` | Failed inserts per piece before it is parked and sent to the back of the queue. It gets a fresh budget when it comes back round. |
+| `--max_grasp_retries` | `5` | Grasp attempts per piece before it goes to the back of the queue. A grasp direction that does not plan costs nothing. |
+| `--approach_height_m` | `0.04` | Height of the hover above each grasp pose; every grasp comes straight down from it and leaves the same way. |
+| `--insert_align_xy_tol_m` | `0.005` | Piece-to-hole XY offset that still counts as insertable [m]. Measured: clean inserts release at 0.2–1.8 mm, and a 6.7 mm release failed to drop in. Every insert logs its measured alignment, so each run adds to that sample. |
+| `--insert_align_yaw_tol_rad` | `0.17` (10°) | Yaw tolerance [rad]. A 30 mm square in a 3 mm-clearance hole physically binds at about 13°. |
+| `--insert_align_tilt_tol_rad` | `0.35` (20°) | Tilt the arm cannot work around [rad]. A guess, deliberately generous — a slightly tipped piece still drops in, and no re-aim can level one. Answers three questions with one number: release or not, re-aim or park, and which faces of a tipped piece are still vertical enough to grip. |
 
 `--generation_num_trials` still counts **successful rollouts**, so a run exports at
 least that many episodes and usually more. Why this matters for training:

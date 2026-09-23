@@ -1,42 +1,101 @@
-"""cuRobo pick-and-place smoke-test policy for SO-101.
+"""cuRobo pick-and-place policy that scripts SO-101 shape-sorting demonstrations.
 
-Sequence per shape: APPROACH → CLOSE → ATTACH → PLACE → INSERT → OPEN → RETREAT,
-then the next shape from ``env.unwrapped.cfg.shapes``. After the last shape: HOME →
-DONE. PLACE stops at a hover pose above the matched lid hole, INSERT lowers the piece
-to the release pose, and RETREAT replays that descent backwards so the gripper is clear
-of the box before anything is planned again.
-Plans via ``MotionClient`` (see ``curobo_motion``); collision world sync lives
-there too. Requires ``--embodiment so101_abs_joint``.
+Design rules — keep them when changing this file
+------------------------------------------------
+This policy grows a recovery at a time; these rules are what keeps it readable. Break
+one only on purpose, and update this block when you do.
+
+1. **Phases are motions, not situations.** There are three: ``GO`` (a planned approach —
+   move to a hover pose, then descend to contact), ``JAW`` (open or close in place, then
+   check what that achieved) and ``UP`` (back out along the descent). ``HOME``/``DONE``
+   end the episode. A new behaviour is a new branch in :meth:`CuroboPolicy._decide`, not
+   a new phase.
+2. **Decide in one place, from the world — once it is still.** ``_decide`` runs whenever
+   the arm is clear of contact and reads the world — is something in the jaws, is the
+   piece in the box, how is it lying — through :func:`next_goal`, a plain decision table.
+   ``UP`` holds until the pieces stop moving first, so nothing is decided about a piece
+   in mid-fall. No flag carries "what to do next" from one phase into another, and no
+   pose is remembered: the only memory is per-piece retry counters, plus two per-attempt
+   facts the *recording* needs (was this attempt already cut, how tipped was the piece
+   before it was grasped).
+3. **Plan whole approaches, and only from clear poses.** A candidate counts only if both
+   its hover move and its descent plan. After contact the arm leaves by replaying the
+   descent — it never asks cuRobo to start from a pose that touches something, which
+   cuRobo refuses and which used to freeze the arm after a release.
+4. **Every failure has an exit that is not a freeze.** A candidate that does not plan
+   gives way to the next; a piece with none goes to the back of the queue, because
+   moving the others can free it up; a full round without progress ends the episode.
+5. **Record only what should be imitated.** Every attempt that does not do what it set
+   out to is cut — at the moment it is caught where that gives the recovery a better
+   first frame, otherwise by ``_decide`` — and "checkpoint" happens only once a piece is
+   verifiably in the box. A clip must never confirm a mistake by accident.
+
+How a piece moves
+-----------------
+::
+
+    GO(grasp) → JAW(close) → UP → decide → GO(insert) → JAW(open) → UP → decide → …
+
+``_decide`` (via :func:`next_goal`)::
+
+    holding, upright, tries left      → INSERT   into its hole
+    holding, tilted or out of tries    → PARK     on a free table spot; gravity levels it
+    empty,   piece in the box          → finish   "checkpoint", on to the next piece
+    empty,   out of tries, or on its side
+             on the table (past 60°)   → defer    to the back of the queue
+    empty,   otherwise                 → GRASP    wherever the piece lies now — on the
+                                                  table, on the lid, wedged in its hole
+
+Where a mistake is caught, and what follows:
+
+* jaw closes on nothing → "cut", UP with the jaw opening, grasp again;
+* the held piece is off its hole at the bottom of the insert descent (XY, yaw folded into
+  its symmetry, tilt) → "cut", UP still holding it, re-aim or park;
+* the released piece never turns up in the cavity → "cut", JAW closes on it again — it is
+  still between the jaws, so that needs no plan — then as above (another "cut" if that
+  close finds nothing);
+* a grasp that let the piece slip, or tipped an upright piece in the jaws → "cut" in
+  ``_decide``; giving up on a piece that used any tries, or dropping one in mid-air
+  because nothing plans → "cut" too.
+
+**Grasp candidates.** The SO-101 wrist rolls about the gripper's own axis, and that axis
+is vertical in a grasp pose, so the jaw can close along any yaw. Candidates point it along
+the piece's face normals (:func:`shape_sorting.shape_forms.face_normal_yaws`) — squeezing
+two flats, never two corners — starting from the radial grasp this policy was tuned with,
+so a neighbour sitting on that line no longer blocks the piece.
 
 **Demo events.** ``pop_demo_events()`` reports "checkpoint" (verified sub-step —
-everything recorded so far is worth keeping) and "cut" (own mistake detected —
-drop back to the last checkpoint and start a new clip here). ``generate_policy_demos``
-turns these into LeRobot episode boundaries; see ``demo_clips``. Other runners can
-ignore them. ``--grasp_perturb_prob`` makes first attempts miss on purpose so the
-recovery gets recorded, and ``--miss_notice_delay_max_steps`` delays noticing so
-recovery clips also start mid-transport.
+everything recorded so far is worth keeping) and "cut" (own mistake detected — drop back
+to the last checkpoint and start a new clip here). ``generate_policy_demos`` turns these
+into LeRobot episode boundaries; see ``demo_clips``. Other runners can ignore them.
+``--grasp_perturb_prob`` and ``--place_perturb_prob`` make first attempts miss on purpose
+so the recoveries get recorded, and ``--miss_notice_delay_max_steps`` delays noticing a
+missed grasp so those clips also start mid-transport. The env's ``--drop_on_hole_prob``
+starts a piece stuck in its hole or lying on the lid instead — the state a trained policy leaves
+after letting go in the wrong place — and this policy needs nothing special for it:
+``_decide`` sees a piece that is not in the box and grasps it where it lies. The queue
+just starts with whatever starts on the box (:meth:`CuroboPolicy._pending`).
 
-An insert that cannot be verified now ends the sequence (``DONE``) instead of moving
-on to the next shape: task success is already impossible, and stopping keeps the
-failure out of the recorded clip.
+Plans via ``MotionClient`` (see ``curobo_motion``); collision-world sync lives there too.
+Requires ``--embodiment so101_abs_joint``.
 
 Example::
 
-    python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \\
-      --viz kit \\
+    python -m shape_sorting.run_policy --enable_cameras --viz kit \\
       --policy_type shape_sorting.curobo_policy.CuroboPolicy \\
-      --num_steps 1200 \\
+      --num_steps 3000 \\
       --external_environment_class_path shape_sorting.shape_sorting_env:ShapeSortingEnvironment \\
-      shape_sorting_test \\
-      --embodiment so101_abs_joint
+      shape_sorting_test --embodiment so101_abs_joint
 """
 
 from __future__ import annotations
 
+import itertools
 import math
 import random
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import TYPE_CHECKING, NamedTuple
 
 import gymnasium as gym
 import torch
@@ -45,11 +104,17 @@ from gymnasium.spaces.dict import Dict as GymSpacesDict
 from arena_so101.mapping import SIM_JOINT_NAMES
 from isaaclab_arena.assets.register import register_policy
 from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
-from shape_sorting.curobo_motion import MotionClient, MotionClientCfg, PlanResult, resolve_robot_yml
+from shape_sorting.curobo_motion import MotionClient, MotionClientCfg, resolve_robot_yml
 from shape_sorting.curobo_viz import KitFrameMarkers, NullCollisionDebugViz, ViserCollisionDebugViz
 from shape_sorting.curobo_world import entity_pose_in_robot_base, entity_position_in_robot_base
-from shape_sorting.shape_forms import ShapeForm, place_yaw_offsets, yaw_symmetry_order
+from shape_sorting.shape_forms import ShapeForm, face_normal_yaws, place_yaw_offsets, yaw_symmetry_order
 from shape_sorting.shape_sorting_env import ShapeInfo
+
+if TYPE_CHECKING:
+    EePose = tuple[torch.Tensor, torch.Tensor]
+    """``(position (3,), quat_xyzw (4,))`` in the robot base frame."""
+    Candidate = tuple[str, EePose, EePose]
+    """``(label, hover pose, contact pose)``."""
 
 # Grasp pose relative to goal_object (robot base frame).
 _GOAL_XY_STANDOFF_M = 0.03
@@ -60,6 +125,46 @@ _GOAL_ROLL_RAD = 0.0
 _JAW_OPEN_RAD = math.radians(100.0)
 _JAW_CLOSE_RAD = math.radians(-10.0)
 _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
+
+# Object-origin height above its resting height when parked on the table. Just enough
+# that the piece is dropped rather than pressed into the table by the position-controlled
+# arm.
+_PARK_RELEASE_CLEARANCE_M = 0.002
+
+# Tipped past this, a piece rests on a side face: no prism here balances on an edge beyond
+# ~45° on its own. Below it, a tipped piece is leaning on something — the rim of its hole,
+# the box, a neighbour — and grasp → park levels it; past it, parking sets it down on the
+# same side face again.
+_LYING_TILT_RAD = math.radians(60.0)
+
+# Half-height and largest plan radius of a piece at the default 30 mm equal-area size (the
+# cube's half-diagonal, 21.2 mm, is the widest). Used to release a tipped piece high enough
+# that its lowest corner clears the table, and to keep parked pieces apart.
+# ponytail: default piece size only; read piece_size/piece_height off the env cfg if those
+# become variable.
+_PIECE_HALF_HEIGHT_M = 0.015
+_PIECE_MAX_RADIUS_M = 0.022
+
+# The fingertip collision spheres' lowest point below the cuRobo tool frame, and the gap
+# kept between them and the lid when grasping a piece that sits on it or in a hole.
+_FINGERTIP_BELOW_TOOL_M = 0.105
+_LID_FINGERTIP_CLEARANCE_M = 0.003
+
+# Where a piece is set down to be picked up level: clear of the box wall (SortingBox's
+# default wall_thickness) and of every other piece's outline by _PARK_CLEARANCE_M.
+_BOX_WALL_M = 0.008
+_PARK_CLEARANCE_M = 0.01
+_PARK_MAX_SPOTS = 3
+# ...and no nearer the robot's base than pieces are ever placed. Closer in, the arm folds
+# over itself for a top-down grasp; live, a regrasp 12 cm from the base knocked the cube
+# over and shoved the box.
+_PARK_MIN_REACH_M = 0.14
+
+# "Still" for _decide: pieces spawn 1 cm up and drop, and one released on the lid can take
+# a while to tip into its final pose. Bounded, so a piece that keeps rolling cannot stall
+# the episode.
+_STILL_SPEED_M_S = 0.02
+_SETTLE_MAX_STEPS = 30
 
 _HOME_JOINT_RAD = tuple(
     math.radians(v)
@@ -75,15 +180,260 @@ _HOME_JOINT_RAD = tuple(
 
 
 class Phase(Enum):
-    APPROACH = auto()
-    CLOSE = auto()
-    ATTACH = auto()
-    PLACE = auto()
-    INSERT = auto()
-    OPEN = auto()
-    RETREAT = auto()
+    """What the arm is doing. Motions only — see the design rules above."""
+
+    GO = auto()
+    JAW = auto()
+    UP = auto()
     HOME = auto()
     DONE = auto()
+
+
+_PHASE_STEPS: dict[Phase, str] = {
+    Phase.GO: "_step_go",
+    Phase.JAW: "_step_jaw",
+    Phase.UP: "_step_up",
+    Phase.HOME: "_step_home",
+}
+"""Handler per phase. ``Phase.DONE`` is the one phase with no step — it just holds.
+
+A table rather than an if/elif chain so a phase added without a handler fails a test
+instead of silently freezing the arm (``tests/test_insert_align.py``).
+"""
+
+
+class Goal(Enum):
+    """Where the current ``GO`` is taking the arm."""
+
+    GRASP = auto()   # the current piece, wherever it lies
+    INSERT = auto()  # the current piece's hole
+    PARK = auto()    # a free table spot — see park_spots()
+
+
+def _wrap_to_pi(angle: float) -> float:
+    return (angle + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def _tilt_of(quat_xyzw: torch.Tensor) -> float:
+    """Angle between a body's own +Z and the base +Z [rad]."""
+    return math.acos(max(-1.0, min(1.0, float(_rot_from_quat_xyzw(quat_xyzw)[2, 2]))))
+
+
+def cube_standing_quat(quat_xyzw: torch.Tensor) -> torch.Tensor:
+    """The same cube with whichever body axis is nearest vertical relabelled as +Z.
+
+    A cube as tall as it is wide is the same solid on every face, so a cube lying on its
+    side *is* a cube standing up. Everything here reads "up" off a piece's own +Z;
+    relabelling the axes — a symmetry of the solid — lets every rule see it that way,
+    instead of calling it lying down and giving up on it.
+    """
+    from isaaclab.utils.math import quat_from_matrix
+
+    rot = _rot_from_quat_xyzw(quat_xyzw)
+    i = max(range(3), key=lambda k: abs(float(rot[2, k])))
+    z = rot[:, i] * (1.0 if float(rot[2, i]) >= 0.0 else -1.0)
+    x = rot[:, (i + 1) % 3]
+    return quat_from_matrix(torch.stack([x, torch.linalg.cross(z, x), z], dim=1).unsqueeze(0))[0]
+
+
+def _raised(xyz: torch.Tensor, dz: float) -> torch.Tensor:
+    out = xyz.clone()
+    out[2] += float(dz)
+    return out
+
+
+def _rot_from_quat_xyzw(quat_xyzw: torch.Tensor) -> torch.Tensor:
+    """3x3 rotation matrix from an xyzw quaternion. Columns are the body axes."""
+    x, y, z, w = (float(v) for v in quat_xyzw.reshape(4))
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm < 1e-9:
+        raise ValueError(f"Degenerate quaternion: {(x, y, z, w)}")
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    return torch.tensor(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=torch.float32,
+    )
+
+
+def alignment_error(
+    obj_pos: torch.Tensor,
+    obj_quat_xyzw: torch.Tensor,
+    hole_pos: torch.Tensor,
+    hole_quat_xyzw: torch.Tensor,
+    *,
+    symmetry_order: int | None,
+) -> tuple[float, float, float]:
+    """How far a piece is from dropping into its hole: ``(xy_m, yaw_rad, tilt_rad)``.
+
+    ``yaw`` is folded into the piece's own rotational symmetry, so a cube 90° off reads
+    0; ``symmetry_order=None`` (the cylinder) reports 0 always. ``tilt`` is the angle
+    between the piece's +Z and the base +Z — the error a 5-DoF arm cannot correct, and
+    the one that says the piece caught on the rim.
+
+    Plain tensor math on purpose: no Isaac Sim import, so it is unit-testable offline
+    (``tests/test_insert_align.py``).
+    """
+    dx = float(obj_pos[0]) - float(hole_pos[0])
+    dy = float(obj_pos[1]) - float(hole_pos[1])
+    xy = math.hypot(dx, dy)
+
+    rot_obj = _rot_from_quat_xyzw(obj_quat_xyzw)
+    tilt = math.acos(max(-1.0, min(1.0, float(rot_obj[2, 2]))))
+    if symmetry_order is None:
+        return xy, 0.0, tilt
+
+    rot_hole = _rot_from_quat_xyzw(hole_quat_xyzw)
+    delta = math.atan2(float(rot_obj[1, 0]), float(rot_obj[0, 0])) - math.atan2(
+        float(rot_hole[1, 0]), float(rot_hole[0, 0])
+    )
+    # Folding by the symmetry period also wraps, so no separate wrap-to-pi is needed.
+    period = 2.0 * math.pi / int(symmetry_order)
+    return xy, abs(delta - period * round(delta / period)), tilt
+
+
+def next_goal(
+    *,
+    holding: bool,
+    upright: bool = True,
+    in_box: bool = False,
+    lying_down: bool = False,
+    insert_tries_left: bool = True,
+    grasp_tries_left: bool = True,
+) -> str:
+    """The decision table ``CuroboPolicy._decide`` runs on.
+
+    Returns "insert", "park", "finish", "defer" or "grasp". A plain function so the whole
+    policy can be read off a few lines and tested without a simulator. ``upright`` only
+    matters while holding; ``in_box``, ``lying_down`` and ``grasp_tries_left`` only while
+    empty. ``lying_down`` is a piece tipped over *on the table*: parking cannot level it,
+    so grasping it would only start a grasp → park → grasp cycle.
+    """
+    if holding:
+        return "insert" if upright and insert_tries_left else "park"
+    if in_box:
+        return "finish"
+    if lying_down or not (grasp_tries_left and insert_tries_left):
+        return "defer"
+    return "grasp"
+
+
+def grasp_jaw_yaws(
+    obj_quat_xyzw: torch.Tensor,
+    face_normals: tuple[float, ...] | None,
+    *,
+    radial_yaw: float,
+    max_tilt: float,
+) -> list[float]:
+    """Absolute jaw yaws [rad] to grasp a piece with, best first.
+
+    The jaws close along the gripper's X axis, so pointing it along a face normal squeezes
+    two flats instead of two corners — a cube held by its diagonal turns in the jaws and
+    goes into the hole crooked. Only normals that are still roughly horizontal count: on a
+    tipped piece those are the faces that stayed vertical (if none do, the least tipped
+    ones). A round piece has a flat everywhere: upright it gets four evenly spaced yaws,
+    which still matter for getting the fingers past a neighbour; tipped, the same four
+    turned to its tilt axis, so the jaws close across a circle rather than squeeze the
+    ellipse it shows along the tilt, and the filter below keeps the two along the axis.
+
+    Ordered by angle from ``radial_yaw`` (the base→piece direction), because the radial
+    grasp is the one ``grasp_height_m`` and the standoff were tuned with.
+    """
+    rot = _rot_from_quat_xyzw(obj_quat_xyzw)
+    up = rot[:, 2]
+    if face_normals is None and math.hypot(float(up[0]), float(up[1])) > 1e-3:
+        axis = rot.T @ torch.tensor([-float(up[1]), float(up[0]), 0.0])  # tilt axis, body frame
+        face_normals = tuple(math.atan2(float(axis[1]), float(axis[0])) + k * math.pi / 2.0 for k in range(4))
+    if face_normals is None:
+        yaws = [radial_yaw + k * math.pi / 2.0 for k in range(4)]
+    else:
+        world = [rot @ torch.tensor([math.cos(p), math.sin(p), 0.0]) for p in face_normals]
+        slope = [abs(float(n[2])) for n in world]
+        limit = max(math.sin(max_tilt), min(slope) + 1e-6)
+        yaws = [math.atan2(float(n[1]), float(n[0])) for n, s in zip(world, slope) if s <= limit]
+    return sorted((_wrap_to_pi(y) for y in yaws), key=lambda y: abs(_wrap_to_pi(y - radial_yaw)))
+
+
+def grasp_tool_xy_roll(
+    piece_x: float, piece_y: float, jaw_yaw: float, standoff: float
+) -> tuple[float, float, float]:
+    """Tool-frame XY and roll that close the jaws along ``jaw_yaw`` around a piece.
+
+    The fixed finger is on the tool's -X side, so the tool stands off the piece by
+    ``standoff`` against the jaw direction — the geometry the radial grasp was tuned with,
+    now rotated as a whole. The roll is relative to the yaw ``so101_ee_pose_xyzw`` derives
+    from the tool position, and every value of it is reachable: the SO-101 wrist rolls
+    about the gripper's own axis, which is vertical in a grasp pose. At
+    ``jaw_yaw = atan2(piece_y, piece_x)`` this reproduces the original grasp exactly.
+    """
+    tool_x = piece_x - standoff * math.cos(jaw_yaw)
+    tool_y = piece_y - standoff * math.sin(jaw_yaw)
+    return tool_x, tool_y, _wrap_to_pi(jaw_yaw - math.atan2(tool_y, tool_x))
+
+
+class BoxFootprint(NamedTuple):
+    """The sorting box seen from above, in the robot base frame."""
+
+    center: tuple[float, float]
+    yaw: float
+    lo: tuple[float, float]
+    """Cavity AABB corners in the box frame (the success term's ``aabb_min/max``)."""
+    hi: tuple[float, float]
+    lid_z: float
+    table_z: float
+    """The table top — the box stands on it, and the lid is as far above its root."""
+
+    def outside_by(self, xy: tuple[float, float]) -> float:
+        """How far ``xy`` lies outside the cavity footprint [m]; negative over the cavity.
+
+        The larger of the two per-axis distances, which is the true distance except past a
+        corner, where it is slightly less — safe for every use here.
+        """
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        dx, dy = xy[0] - self.center[0], xy[1] - self.center[1]
+        lx, ly = c * dx + s * dy, -s * dx + c * dy
+        return max(self.lo[0] - lx, lx - self.hi[0], self.lo[1] - ly, ly - self.hi[1])
+
+    def ring(self, off: float, spacing: float = 0.03) -> list[tuple[float, float]]:
+        """Points every ~``spacing`` along the cavity footprint grown by ``off``."""
+        x0, y0, x1, y1 = self.lo[0] - off, self.lo[1] - off, self.hi[0] + off, self.hi[1] + off
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+        local = []
+        for (ax, ay), (bx, by) in itertools.pairwise(corners):
+            n = max(1, round(math.hypot(bx - ax, by - ay) / spacing))
+            local += [(ax + (bx - ax) * i / n, ay + (by - ay) * i / n) for i in range(n)]
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        return [(self.center[0] + c * x - s * y, self.center[1] + s * x + c * y) for x, y in local]
+
+
+def park_spots(
+    box: BoxFootprint,
+    *,
+    here_xy: tuple[float, float],
+    others_xy: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Free table spots to set a piece down on, best first. XY in the robot base frame.
+
+    ``here_xy`` — right under the lifted piece — comes first: a piece lifted off the table
+    goes straight back where it was, which nothing else can have taken. A piece lifted off
+    the lid or out of a hole has no such spot, so a ring around the box follows, nearest
+    first. A spot must stand clear of the box wall and of the other pieces, and off the
+    cramped strip next to the robot's base; whether the arm can reach it is the planner's
+    call.
+    """
+    clear = _BOX_WALL_M + _PIECE_MAX_RADIUS_M + _PARK_CLEARANCE_M
+    gap = 2.0 * _PIECE_MAX_RADIUS_M + _PARK_CLEARANCE_M
+    ring = sorted(box.ring(clear), key=lambda p: math.dist(p, here_xy))
+    return [
+        p
+        for p in [tuple(here_xy), *ring]
+        if box.outside_by(p) >= clear - 1e-6
+        and math.hypot(*p) >= _PARK_MIN_REACH_M
+        and all(math.dist(p, o) >= gap for o in others_xy)
+    ]
 
 
 def so101_ee_pose_xyzw(
@@ -131,7 +481,7 @@ def so101_ee_pose_xyzw(
 
 @dataclass
 class CuroboPolicyCfg(PolicyCfg):
-    """Configure a cuRobo pick-and-place sequence for SO-101 abs-joint control."""
+    """Configure the cuRobo shape-sorting policy for SO-101 abs-joint control."""
 
     robot_yml: str = ""
     """Path to cuRobo ``so101.yml``. Empty uses the generated package default."""
@@ -142,37 +492,57 @@ class CuroboPolicyCfg(PolicyCfg):
     place_object: str = "sorting_box"
     """Unused; place XY/Z come from ``hole_frames`` matching the current shape."""
 
-    grasp_z_m: float = 0.145
-    """Tool-frame height for the grasp pose, in the robot base frame [m].
+    grasp_height_m: float = 0.10
+    """Tool-frame height above the piece's origin for the grasp pose [m].
 
     Calibration knob: the cuRobo tool frame is the ``gripper`` *link* origin, ~0.105 m
-    above where the jaws actually close, so this decides *where on the piece* the jaws
-    grip. At the default it is the piece's mid-height.
+    above where the jaws actually close (the fingertip collision sphere sits 0.105 below
+    it), so this decides *where on the piece* the jaws grip. The default puts the
+    fingertips 5 mm below the piece's centre — for a piece standing on the table, ~1 cm
+    above the table; 1 cm lower and there is no collision-free solution at all.
+
+    Measured from the piece's live pose, so it holds wherever the piece lies. On the lid
+    or wedged in a hole, the grasp is raised as far as it takes for the fingertips to
+    clear the lid. (This replaced an absolute ``grasp_z_m=0.145``: same grasp on the
+    table, but one that needed the piece's resting height on record.)
 
     Gripping higher is tempting — it keeps the jaws further above the lid while the piece
-    is seated — but it measured worse: 0/9 failed insertions here against 3/13 at 0.151
+    is seated — but it measured worse: 0/9 failed insertions here against 3/13 at 0.106
     over 3 rollouts each (unpaired, so weak — pass ``--placement_seed`` to compare
     properly), with no clearance problem to fix at either height. The likely mechanism
     is that the piece hangs lower below the grip and tilts further when its bottom
     catches the hole rim. Raise it only together with a deeper
     :attr:`place_z_offset_m`, and re-measure."""
 
+    approach_height_m: float = 0.04
+    """Height of the pre-grasp hover above the grasp pose [m].
+
+    Every grasp comes straight down from here, and ``UP`` replays that descent to leave,
+    so the arm never plans from a pose with its fingers around a piece. Must clear the
+    open jaw over the neighbours; the planner rejects a hover that does not."""
+
     place_z_offset_m: float = 0.02
     """Object-origin height above the matched lid hole at release [m].
 
-    The piece drops the last few mm and the rim chamfer finishes the alignment. Lowering
-    it until the bottom is *inside* the lid was tried and measured worse: 4 failed
-    insertions in 22 against 1 in 19, paired on ``--placement_seed``. The jaws are rigid
-    and position-controlled, so driving a slightly misaligned piece onto the rim jams it
-    where dropping lets gravity correct it."""
+    The hole frame sits on the lid top, so at the defaults this leaves the piece's bottom
+    about 5 mm clear of the lid (0.020 offset − 0.015 half-height) and it drops the rest
+    of the way, the rim chamfer finishing the alignment. 0.015 would put the bottom
+    exactly on the lid; below that it is inside the hole at release.
+
+    Lowering it to 0.011 was tried and measured worse — 4 failed insertions in 22
+    against 1 in 19, paired on ``--placement_seed`` — because the jaws are rigid and
+    position-controlled, so they jam a slightly misaligned piece onto the rim where
+    dropping lets gravity correct it. Worth re-measuring now: that comparison was run
+    when a failed insert ended the rollout, and jams are now recovered from rather than
+    fatal, so the trade it lost on has changed."""
 
     place_hover_z_offset_m: float = 0.045
-    """Object-origin height above the lid hole at the end of PLACE [m].
+    """Object-origin height above the lid hole at the end of the hover move [m].
 
-    The gap to :attr:`place_z_offset_m` is the INSERT descent, and RETREAT replays it
-    backwards, so this is how far the empty gripper lifts before anything is planned
-    again. That climb-out is the point: planning straight from the release pose can start
-    inside the box's collision margin, and cuRobo then fails every attempt on the spot.
+    The gap to :attr:`place_z_offset_m` is the insert descent, and ``UP`` replays it
+    backwards, so this is how far the gripper lifts before anything is planned again.
+    That climb-out is the point: planning straight from the release pose can start inside
+    the box's collision margin, and cuRobo then fails every attempt on the spot.
     Measured free — the 25 mm default matches a no-retreat run release for release."""
 
     position_tolerance: float = 0.015
@@ -182,19 +552,24 @@ class CuroboPolicyCfg(PolicyCfg):
     """Orientation tolerance [rad]."""
 
     jaw_open: float = _JAW_OPEN_RAD
-    """Jaw command during APPROACH / OPEN [rad]."""
+    """Jaw command while approaching a piece and when releasing it [rad]."""
 
     jaw_closed: float = _JAW_CLOSE_RAD
-    """Jaw command during CLOSE / ATTACH / PLACE [rad]."""
+    """Jaw command while grasping and carrying [rad]. Below the fully-closed position on
+    purpose, so the jaw keeps squeezing whatever it holds."""
 
     close_steps: int = 12
-    """Sim steps to hold the closed jaw before ATTACH (~0.4 s at the default 30 Hz)."""
+    """Sim steps to hold the closing jaw before checking the grasp (~0.4 s at 30 Hz)."""
 
     jaw_empty_tol: float = math.radians(5.0)
-    """If measured jaw is within this of ``jaw_closed`` after CLOSE, treat grasp as empty."""
+    """A measured jaw within this of ``jaw_closed`` means it closed on nothing [rad]."""
 
     max_grasp_retries: int = 5
-    """Max APPROACH→CLOSE attempts per shape before aborting (empty grasps)."""
+    """Grasp attempts per piece before it goes to the back of the queue.
+
+    Counts attempts that actually moved; a candidate that does not plan costs nothing.
+    Reset when the piece comes back round, which only happens after another piece went
+    in — so it cannot loop."""
 
     grasp_perturb_prob: float = 0.0
     """Probability that the *first* grasp attempt on a piece is deliberately offset.
@@ -210,22 +585,79 @@ class CuroboPolicyCfg(PolicyCfg):
     Check the share of perturbed attempts that plan successfully in the logs."""
 
     insert_settle_steps: int = 15
-    """Extra OPEN-hold steps to wait for the released piece to land inside the box.
+    """Extra open-jaw steps to wait for a released piece to land inside the box.
 
     The check runs once as soon as ``open_steps`` elapses, so a clean insert costs no
-    extra frames. Exhausting the window means the insert failed → DONE (~0.5 s at 30 Hz)."""
+    extra frames. A piece that has not turned up by the end (~0.5 s at 30 Hz) is closed
+    on again and recovered."""
 
     miss_notice_delay_max_steps: int = 0
     """Max steps to keep carrying an empty gripper before noticing a missed grasp.
 
     The delay is sampled uniformly in ``[0, max]`` per miss, so instant retries are still
-    produced. 0 keeps today's behaviour. A non-zero value makes recovery clips start
+    produced. 0 keeps the instant retry only. A non-zero value makes recovery clips start
     mid-transport, which is the state a trained policy actually lands in — see
-    ``training_research.local/recovery-gap.md``. Capped by the place trajectory so the
-    gripper never reaches the box empty."""
+    ``training_research.local/recovery-gap.md``. Always noticed before the descent
+    starts, so an empty gripper is never lowered onto anything."""
+
+    max_insert_retries: int = 2
+    """Failed inserts per piece before it is parked and sent to the back of the queue.
+
+    A recovery is lift → re-aim (or park and re-grasp level) → place again. The piece
+    gets a fresh budget when it comes back round, which only happens after another piece
+    went in, so it cannot loop. 0 means one attempt and no recovery."""
+
+    insert_align_xy_tol_m: float = 0.005
+    """Max piece-to-hole XY offset that still counts as insertable [m].
+
+    Calibration knob, checked while the piece is still gripped. Measured on two headless
+    runs: 16 clean inserts released at 0.0-5.0 mm, and a cylinder released at 6.7 mm did
+    *not* fall in — so the earlier 8 mm let a sure failure through to the slower
+    post-release recovery. The limit for the cylinder sits somewhere in 5-6.7 mm; 5 mm
+    errs toward re-aiming, which is the cheap mistake here (a re-aim, against a regrip
+    from the lid). Every insert logs its alignment, so each run adds to the sample."""
+
+    insert_align_yaw_tol_rad: float = math.radians(10.0)
+    """Max piece-to-hole yaw error, folded into the piece's symmetry [rad].
+
+    Calibration knob. A 30 mm square in a 3 mm-clearance hole binds at about 13°
+    (``s*(cos+sin) <= s + 2c``), so the default is just inside the geometric limit.
+    Meaningless for the cylinder, which reports 0 yaw error by construction."""
+
+    insert_align_tilt_tol_rad: float = math.radians(20.0)
+    """Tilt off vertical the arm can no longer work around [rad].
+
+    Guessed, not derived — a real number would need the rim chamfer, the drop height and
+    the piece silhouette. Deliberately generous: a slightly tipped piece still drops in,
+    and the wrist cannot level a piece anyway, so a tight value only buys pointless
+    parking. One number for every question that reduces to it:
+
+    * end of the insert descent — is the held piece too tilted to let go of?
+    * ``_decide`` while holding — can this grasp be re-aimed (under) or must the piece be
+      put down and picked up level (over)? Tilt is the only error re-aiming cannot fix.
+    * grasp candidates — which of a tipped piece's faces are still vertical enough to
+      squeeze?
+    """
+
+    place_perturb_prob: float = 0.0
+    """Probability that the *first* placement of a piece is deliberately misaligned.
+
+    The counterpart of :attr:`grasp_perturb_prob` for inserts. Retries always use the
+    true pose, so the recorded recovery is a correct demonstration. 0 disables it."""
+
+    place_perturb_xy_m: float = 0.012
+    """Half-width of the uniform per-axis XY offset on a perturbed placement [m]."""
+
+    place_perturb_yaw_rad: float = math.radians(45.0)
+    """Half-width of the uniform yaw offset on a perturbed placement [rad].
+
+    Yaw is the failure a trained policy actually produces on non-circular pieces, and a
+    cube arriving 45° off its hole is the case its recovery most needs to have seen — so
+    the default spans the cube's whole folded range. Sampling uniformly rather than at
+    the bound keeps a mix of near misses (which still drop in) and clear ones."""
 
     open_steps: int = 12
-    """Sim steps to hold the open jaw before HOME (~0.4 s at the default 30 Hz)."""
+    """Sim steps to hold the opening jaw before checking the release (~0.4 s at 30 Hz)."""
 
     home_steps: int = 18
     """Sim steps to cosine-interpolate to the home joint pose (~0.6 s at 30 Hz)."""
@@ -263,7 +695,7 @@ class CuroboPolicyCfg(PolicyCfg):
 
 @register_policy
 class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
-    """Pick each ``env.cfg.shapes`` piece, then HOME."""
+    """Sort every ``env.cfg.shapes`` piece into its hole, recovering from its own misses."""
 
     name = "curobo_reach"
 
@@ -271,17 +703,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         super().__init__(config)
         self._motion: MotionClient | None = None
         self._kit_markers: KitFrameMarkers | None = None
-        self._phase = Phase.APPROACH
-        self._traj: torch.Tensor | None = None
-        self._step_idx = 0
-        self._phase_steps = 0
-        self._grasp_attempts = 0
-        self._hold_action: torch.Tensor | None = None
-        self._shape_idx = 0
-        self._shapes: list[ShapeInfo] | None = None
         self._demo_events: list[str] = []
-        self._miss_cut_in: int | None = None
-        self._place_roll = _GOAL_ROLL_RAD
+        self.reset()
 
     # ------------------------------------------------------------------
     # PolicyBase
@@ -291,18 +714,30 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         if self._motion is not None:
             self._motion.detach()
             self._motion.clear_last_goal()
-        self._phase = Phase.APPROACH
-        self._traj = None
+        # The arm: what it is doing right now. UP with nothing to replay waits for the
+        # pieces to land and goes to _decide, which is exactly what the first step of an
+        # episode needs.
+        self._phase = Phase.UP
+        self._goal = Goal.GRASP
+        self._traj: torch.Tensor | None = None
         self._step_idx = 0
+        self._descent_start = 0
         self._phase_steps = 0
+        self._jaw_cmd = float(self.config.jaw_open)
+        self._hold_action: torch.Tensor | None = None
+        # The task: which pieces are left, and how the current one is going.
+        self._shapes: list[ShapeInfo] | None = None
+        self._todo: list[ShapeInfo] | None = None
+        self._stalled = 0
         self._grasp_attempts = 0
-        self._hold_action = None
-        self._shape_idx = 0
-        self._shapes = None
+        self._insert_attempts = 0
+        self._miss_cut_in: int | None = None
+        # Recording facts about the current attempt. "Already cut" starts true: there is no
+        # attempt yet, so nothing to cut.
+        self._attempt_cut = True
+        self._grasp_tilt = 0.0
         # policy_runner never drains these; clear so they cannot leak across episodes.
         self._demo_events.clear()
-        self._miss_cut_in = None
-        self._place_roll = _GOAL_ROLL_RAD
 
     def is_demonstration_ended(self) -> bool:
         """True after the scripted sequence has finished (HOME → DONE)."""
@@ -338,265 +773,166 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             )
 
         motion = self._ensure_motion(device)
-
-        if self._phase is Phase.APPROACH:
-            action = self._step_approach(env, device, motion)
-        elif self._phase is Phase.CLOSE:
-            action = self._step_close(env, device, motion)
-        elif self._phase is Phase.ATTACH:
-            action = self._step_attach(env, device, motion)
-        elif self._phase is Phase.PLACE:
-            action = self._step_place(env, device, motion)
-        elif self._phase is Phase.INSERT:
-            action = self._step_insert(env, device, motion)
-        elif self._phase is Phase.OPEN:
-            action = self._step_open(env, device, motion)
-        elif self._phase is Phase.RETREAT:
-            action = self._step_retreat(env, device, motion)
-        elif self._phase is Phase.HOME:
-            action = self._step_home(env, device, motion)
+        step = _PHASE_STEPS.get(self._phase)
+        if step is not None:
+            action = getattr(self, step)(env, device, motion)
         else:  # DONE
-            action = self._hold_action
-            if action is None:
-                action = motion.joint_action(env, device)
+            action = self._hold(env, device, motion)
 
         self._update_kit_markers(env, device, motion)
         return action.unsqueeze(0).expand(num_envs, -1).contiguous()
 
     # ------------------------------------------------------------------
-    # Phase steps
+    # Motions — each plays one thing and hands over. Only _decide chooses.
     # ------------------------------------------------------------------
 
-    def _step_approach(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        if self._traj is None:
-            motion.detach()  # free-space approach must not carry a previous attach
-            self._grasp_attempts += 1
-            shape = self._current_shape(env)
-            max_attempts = max(1, int(self.config.max_grasp_retries))
-            print(
-                f"[CuroboPolicy] APPROACH shape {self._shape_idx + 1}/"
-                f"{len(self._resolve_shapes(env))} ({shape.name}) "
-                f"grasp attempt {self._grasp_attempts}/{max_attempts}."
-            )
-            xy_offset = self._sample_grasp_offset()
-            goal_xyz, goal_quat = self._grasp_pose_in_robot_base(
-                env, device, xy_offset=xy_offset
-            )
-            plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="APPROACH")
-            if xy_offset != (0.0, 0.0):
-                print(
-                    f"[CuroboPolicy] APPROACH perturbed by "
-                    f"({xy_offset[0]:+.3f}, {xy_offset[1]:+.3f}) m — plan success={plan.success}."
-                )
-            self._traj = plan.waypoints
-            self._hold_action = plan.hold_action
-            self._step_idx = 0
+    def _start_go(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        self._phase = Phase.GO
+        return self._step_go(env, device, motion)
 
-        action = self._playback_traj(device, motion, jaw=self.config.jaw_open)
-        if action is not None:
-            return action
-
-        print(f"[CuroboPolicy] APPROACH done → CLOSE ({self.config.close_steps} steps).")
-        self._phase = Phase.CLOSE
-        self._phase_steps = 0
-        return self._step_close(env, device, motion)
-
-    def _step_close(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        action = self._hold_with_jaw(device, self.config.jaw_closed)
-        self._phase_steps += 1
-        if self._phase_steps < max(1, int(self.config.close_steps)):
-            return action
-
-        jaw = motion.measured_jaw(env, device)
-        if self._jaw_is_fully_closed(jaw):
-            max_attempts = max(1, int(self.config.max_grasp_retries))
-            if self._grasp_attempts >= max_attempts:
-                print(
-                    f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
-                    f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — "
-                    f"empty grasp after {self._grasp_attempts}/{max_attempts} "
-                    f"attempt(s) → DONE."
-                )
-                self._phase = Phase.DONE
-                return action
-            delay = self._sample_miss_notice_delay()
-            if delay > 0:
-                # Carry the empty gripper for a while before noticing, so the recovery
-                # clip starts mid-transport. ATTACH/PLACE plan fine: attach() fits
-                # spheres on the real piece and the place goal shifts by a few cm.
-                print(
-                    f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
-                    f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp "
-                    f"({self._grasp_attempts}/{max_attempts}), noticing in {delay} step(s)."
-                )
-                self._miss_cut_in = delay
-                self._phase = Phase.ATTACH
-                return action
-
-            print(
-                f"[CuroboPolicy] CLOSE: grasp failed, jaw fully closed "
-                f"({float(jaw):.3f} ≈ {self.config.jaw_closed:.3f}) — empty grasp "
-                f"({self._grasp_attempts}/{max_attempts}) → APPROACH."
-            )
-            self._demo_events.append("cut")
-            return self._restart_approach(env, device, motion)
-
-        print(f"[CuroboPolicy] CLOSE done (jaw={float(jaw):.3f}) → ATTACH.")
-        self._phase = Phase.ATTACH
-        self._grasp_attempts = 0
-        return action
-
-    def _step_attach(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        motion.attach(env, device, self._current_shape(env).name)
-        print("[CuroboPolicy] ATTACH done → PLACE.")
-        self._phase = Phase.PLACE
-        self._traj = None
-        self._step_idx = 0
-        return self._step_place(env, device, motion)
-
-    def _step_place(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        if self._traj is None:
-            plan = self._plan_place(env, device, motion)
-            self._traj = plan.waypoints
-            self._hold_action = plan.hold_action
-            self._step_idx = 0
-
+    def _step_go(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        """Play the planned approach — hover move, then descent — and act on arrival."""
+        assert self._traj is not None
         if self._miss_cut_in is not None:
-            # Cap at the last waypoint so the gripper never reaches OPEN empty-handed.
-            last_waypoint = self._step_idx >= self._traj.shape[0] - 1
-            if self._miss_cut_in <= 0 or last_waypoint:
-                print(
-                    "[CuroboPolicy] PLACE: noticed the empty gripper mid-transport → APPROACH."
-                )
+            # Carrying a missed piece on purpose. Notice before the descent starts, so an
+            # empty gripper is never lowered onto the box or the table.
+            if self._miss_cut_in <= 0 or self._step_idx >= self._descent_start - 1:
                 self._miss_cut_in = None
-                self._demo_events.append("cut")
-                return self._restart_approach(env, device, motion)
+                self._jaw_cmd = float(self.config.jaw_open)  # known empty from here on
+                self._cut("GO: noticed the empty gripper mid-transport")
+                return self._decide(env, device, motion)
             self._miss_cut_in -= 1
 
-        action = self._playback_traj(device, motion, jaw=self.config.jaw_closed)
+        carrying = self._goal is not Goal.GRASP
+        action = self._playback_traj(
+            device, motion, jaw=self.config.jaw_closed if carrying else self.config.jaw_open
+        )
         if action is not None:
             return action
 
-        print("[CuroboPolicy] PLACE done (hover) → INSERT.")
-        self._phase = Phase.INSERT
-        self._traj = None
-        self._step_idx = 0
-        return self._step_insert(env, device, motion)
+        if self._goal is Goal.GRASP:
+            return self._start_jaw(env, device, motion, self.config.jaw_closed)
+        if self._goal is Goal.INSERT:
+            # Last look before letting go, while the piece can still be taken back out.
+            reason = self._insert_misaligned(env, device)
+            if reason is not None:
+                self._insert_failed(f"GO: {reason}")
+                return self._start_up(env, device, motion)
+        return self._start_jaw(env, device, motion, self.config.jaw_open)
 
-    def _step_insert(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
+    def _start_jaw(
+        self, env: gym.Env, device: torch.device, motion: MotionClient, jaw: float
     ) -> torch.Tensor:
-        """Lower the grasped piece from the hover pose to the release pose."""
-        if self._traj is None:
-            # The descent ends a few mm above the lid, well inside the planner's 3 cm
-            # collision activation distance, so with the box on the optimiser buys
-            # clearance by drifting off the hole axis. It is a straight drop from
-            # directly above the hole, so there is nothing to plan around anyway.
-            # ponytail: kept because it is what the measured defaults were tuned with.
-            # The descent no longer reaches into the hole, so this is likely removable —
-            # re-measure insert failures with the box left on before deleting it.
-            motion.disable_obstacles(self._box_entity_name(env))
-            goal_xyz, goal_quat = self._place_pose_in_robot_base(
-                env, device, motion, roll=self._place_roll,
-                z_offset=self.config.place_z_offset_m,
-            )
-            plan = motion.plan_to_pose(env, device, goal_xyz, goal_quat, label="INSERT")
-            if not plan.success:
-                print("[CuroboPolicy] INSERT plan failed — releasing from the hover pose.")
-            self._traj = plan.waypoints
-            self._hold_action = plan.hold_action
-            self._step_idx = 0
-
-        action = self._playback_traj(device, motion, jaw=self.config.jaw_closed)
-        if action is not None:
-            return action
-
-        print(f"[CuroboPolicy] INSERT done → OPEN ({self.config.open_steps} steps).")
-        self._phase = Phase.OPEN
+        self._phase = Phase.JAW
+        self._jaw_cmd = float(jaw)
         self._phase_steps = 0
-        return self._step_open(env, device, motion)
+        return self._step_jaw(env, device, motion)
 
-    def _step_open(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        if self._phase_steps == 0:
-            motion.detach()  # release collision spheres as soon as the jaw opens
-
-        action = self._hold_with_jaw(device, self.config.jaw_open)
+    def _step_jaw(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        """Hold the arm still while the jaw moves, then see what that achieved."""
+        opening = self._jaw_cmd == float(self.config.jaw_open)
+        if opening and self._phase_steps == 0:
+            motion.detach()  # whatever was held is part of the world again
+        action = self._hold_with_jaw(device, self._jaw_cmd)
         self._phase_steps += 1
-        if self._phase_steps < max(1, int(self.config.open_steps)):
+        steps = self.config.open_steps if opening else self.config.close_steps
+        if self._phase_steps < max(1, int(steps)):
             return action
+        if opening:
+            return self._after_release(env, device, motion, action)
+        return self._after_close(env, device, motion)
 
-        # Hold open until the piece is verifiably in the box. Checkpointing only here
-        # means a saved clip can never end with a failed insert.
-        if not self._piece_inserted(env):
-            settle_deadline = max(1, int(self.config.open_steps)) + max(
+    def _after_close(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        """The jaw has closed — on the piece, or on nothing."""
+        shape = self._current_shape(env)
+        jaw = float(motion.measured_jaw(env, device))
+        if not self._jaw_is_fully_closed(jaw):
+            print(f"[CuroboPolicy] JAW closed on {shape.name} (jaw={jaw:.3f}) → UP.")
+            return self._start_up(env, device, motion)
+
+        if self._goal is Goal.GRASP:
+            delay = self._sample_miss_notice_delay()
+            print(
+                f"[CuroboPolicy] JAW closed on nothing (jaw={jaw:.3f}) — missed {shape.name}, "
+                f"attempt {self._grasp_attempts}/{self.config.max_grasp_retries}"
+                + (f"; carrying on for {delay} step(s) before noticing." if delay else ".")
+            )
+            if delay > 0:
+                # Pretend it worked, so the recovery clip starts mid-transport — the state a
+                # trained policy that missed actually finds itself in. Attach the piece here,
+                # at the bottom: its offset is then what a real grasp would have measured, so
+                # the empty carry flies at the height of a real one instead of 4 cm above it.
+                self._miss_cut_in = delay
+                motion.attach(env, device, shape.name)
+                return self._start_up(env, device, motion)
+            self._cut(f"JAW: missed {shape.name}")
+        else:
+            # A regrip after a failed drop, and the piece had already slid out of reach.
+            # Cut again so closing on air is not what the next clip confirms; it starts from
+            # the empty jaw at the box instead, which is a state worth recovering from.
+            self._cut(f"JAW: regrip closed on nothing — {shape.name} is out of reach")
+        self._jaw_cmd = float(self.config.jaw_open)
+        return self._start_up(env, device, motion)
+
+    def _after_release(
+        self, env: gym.Env, device: torch.device, motion: MotionClient, action: torch.Tensor
+    ) -> torch.Tensor:
+        """The jaw has opened. Only an insert has anything to verify."""
+        if self._goal is not Goal.INSERT:
+            return self._start_up(env, device, motion)
+        inserted = self._piece_inserted(env)
+        if not inserted:
+            deadline = max(1, int(self.config.open_steps)) + max(
                 1, int(self.config.insert_settle_steps)
             )
-            if self._phase_steps < settle_deadline:
+            if self._phase_steps < deadline:
                 return action
-            print(
-                f"[CuroboPolicy] OPEN: {self._current_shape(env).name} is not in the box "
-                f"after {self.config.insert_settle_steps} settle step(s) — insert failed → DONE."
-            )
-            self._phase = Phase.DONE
-            return action
-
-        print(
-            f"[CuroboPolicy] OPEN done ({self._current_shape(env).name} is in the box) "
-            f"→ RETREAT."
+            # Inside the cavity but still bouncing is a slow success, not a failure.
+            inserted = self._piece_inserted(env, require_settled=False)
+        if inserted:
+            return self._start_up(env, device, motion)
+        # It did not fall in, and it is still between the open jaws: close on it again
+        # rather than walk away. That needs no plan, and nothing else is reachable from
+        # down here anyway.
+        self._insert_failed(
+            f"JAW: {self._current_shape(env).name} is not in the box after "
+            f"{self.config.insert_settle_steps} settle step(s)"
         )
-        self._phase = Phase.RETREAT
-        return self._step_retreat(env, device, motion)
+        return self._start_jaw(env, device, motion, self.config.jaw_closed)
 
-    def _step_retreat(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        """Back out of the hole along the INSERT descent, then checkpoint the clip.
+    def _start_up(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        self._phase = Phase.UP
+        self._phase_steps = 0
+        return self._step_up(env, device, motion)
 
-        Replay rather than a plan: the open jaws straddle the piece now standing in the
-        hole, so the start state is in collision and cuRobo would refuse to plan out of
-        it — which is how the arm used to sit there until the retries ran out.
+    def _step_up(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        """Back out along the descent, the way the arm came in, then decide.
+
+        A replay, not a plan: at the bottom the jaws straddle a piece or sit inside the
+        lid's collision margin, and cuRobo refuses to plan out of a start state like that —
+        which is how the arm used to freeze after a release. With no descent to undo (the
+        first step of an episode, or letting go in mid-air) this goes straight on.
+
+        Then it holds until nothing is moving: pieces spawn 1 cm up and drop, one let go
+        of on the lid tips into its final pose, and a decision about either before it
+        lands would plan a grasp around where the piece was.
         """
-        action = self._playback_traj_reversed(device, motion, jaw=self.config.jaw_open)
-        if action is not None:
-            return action
+        if self._traj is None or self._step_idx <= self._descent_start:
+            # The first step of an episode always holds: every piece was just teleported
+            # into place and reads zero velocity, mid-air or not.
+            first_step = self._hold_action is None
+            if first_step or (self._phase_steps < _SETTLE_MAX_STEPS and not self._world_still(env)):
+                self._phase_steps += 1
+                return self._hold(env, device, motion)
+            return self._decide(env, device, motion)
+        action = self._playback_traj_reversed(device, motion, jaw=self._jaw_cmd)
+        assert action is not None  # _step_idx > _descent_start >= 0
+        return action
 
-        # Checkpoint here rather than at OPEN so a saved clip ends with the gripper
-        # clear of the box, which is also where the next clip has to start from.
-        self._demo_events.append("checkpoint")
-        shapes = self._resolve_shapes(env)
-        if self._shape_idx + 1 < len(shapes):
-            self._shape_idx += 1
-            nxt = shapes[self._shape_idx]
-            print(
-                f"[CuroboPolicy] RETREAT done → APPROACH "
-                f"shape {self._shape_idx + 1}/{len(shapes)} ({nxt.name})."
-            )
-            self._phase = Phase.APPROACH
-            self._traj = None
-            self._step_idx = 0
-            self._phase_steps = 0
-            self._grasp_attempts = 0
-            motion.clear_last_goal()
-            return self._step_approach(env, device, motion)
 
-        print(
-            f"[CuroboPolicy] RETREAT done (all {len(shapes)} shapes) → HOME "
-            f"({self.config.home_steps} steps)."
-        )
-        self._phase = Phase.HOME
-        self._traj = None
-        self._step_idx = 0
-        return self._step_home(env, device, motion)
+    # ------------------------------------------------------------------
+    # Home and trajectory playback
+    # ------------------------------------------------------------------
 
     def _step_home(
         self, env: gym.Env, device: torch.device, motion: MotionClient
@@ -615,10 +951,6 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._step_idx += 1
         self._hold_action = action
         return action
-
-    # ------------------------------------------------------------------
-    # Trajectory helpers
-    # ------------------------------------------------------------------
 
     def _build_home_traj(
         self, env: gym.Env, device: torch.device, motion: MotionClient
@@ -665,56 +997,11 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         self._hold_action = action
         return action
 
-    def _restart_approach(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> torch.Tensor:
-        """Abandon the current attempt and re-approach the piece in this same step.
-
-        ``_step_approach`` detaches first, which re-enables the piece's collision
-        obstacle, so a re-plan after a pretended grasp starts from a clean world.
-        """
-        self._phase = Phase.APPROACH
-        self._traj = None
-        self._step_idx = 0
-        self._phase_steps = 0
-        motion.clear_last_goal()
-        return self._step_approach(env, device, motion)
-
-    def _sample_grasp_offset(self) -> tuple[float, float]:
-        """XY offset for this attempt: only the first attempt is ever perturbed."""
-        if self._grasp_attempts != 1:
-            return (0.0, 0.0)
-        if random.random() >= float(self.config.grasp_perturb_prob):
-            return (0.0, 0.0)
-        m = float(self.config.grasp_perturb_xy_m)
-        return (random.uniform(-m, m), random.uniform(-m, m))
-
-    def _sample_miss_notice_delay(self) -> int:
-        """Steps to keep carrying an empty gripper before noticing the miss."""
-        return random.randint(0, max(0, int(self.config.miss_notice_delay_max_steps)))
-
-    @staticmethod
-    def _box_entity_name(env: gym.Env) -> str:
-        """Scene entity name of the sorting box, from the success-term container."""
-        params = getattr(env.unwrapped.cfg, "piece_in_box_params", None)
-        if params is None:
-            raise RuntimeError("Sorting box unknown: env.cfg.piece_in_box_params is missing.")
-        return str(params["container_cfg"].name)
-
-    def _piece_inserted(self, env: gym.Env) -> bool:
-        """Whether the current piece sits settled inside the box, per the success term."""
-        params = getattr(env.unwrapped.cfg, "piece_in_box_params", None)
-        if params is None:
-            return True  # --goal_object smoke test: no sorting box to check against.
-
-        from isaaclab.managers import SceneEntityCfg
-        from shape_sorting.predicates import objects_centers_inside_aabb
-
-        per_piece = {
-            **params,
-            "object_cfg_list": [SceneEntityCfg(self._current_shape(env).name)],
-        }
-        return bool(objects_centers_inside_aabb(env.unwrapped, **per_piece)[0])
+    def _hold(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        """Stay where the last action put the arm (or where it is, before any action)."""
+        if self._hold_action is None:
+            self._hold_action = motion.joint_action(env, device)
+        return self._hold_action
 
     def _hold_with_jaw(self, device: torch.device, jaw: float) -> torch.Tensor:
         assert self._hold_action is not None
@@ -725,6 +1012,550 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
     def _jaw_is_fully_closed(self, jaw: float | torch.Tensor) -> bool:
         return float(jaw) <= float(self.config.jaw_closed) + float(self.config.jaw_empty_tol)
+
+    # ------------------------------------------------------------------
+    # Decisions — the only place that chooses what happens next
+    # ------------------------------------------------------------------
+
+    def _decide(self, env: gym.Env, device: torch.device, motion: MotionClient) -> torch.Tensor:
+        """Pick the next motion from the world. Runs only with the arm clear of contact."""
+        self._traj = None
+        pretending = self._miss_cut_in is not None
+        holding = pretending or self._holding(env, device, motion)
+        name = self._current_shape(env).name
+        if not pretending and not holding and self._jaw_cmd == float(self.config.jaw_closed):
+            # The jaw was closed on the piece and now holds nothing: it slipped out on the
+            # way up — after a grasp, a re-aim or a regrip alike. Cut even if this attempt
+            # was cut already: the lift that lost it is a new mistake after that cut.
+            self._cut(f"decide: {name} slipped out of the jaws")
+        elif self._goal is Goal.GRASP and holding and not pretending and not self._attempt_cut:
+            # Tipping an upright piece in the jaws is a bad grasp. Tipped *before* the grasp
+            # (perched on the lid) is different: then holding it at all is the recovery.
+            tol = float(self.config.insert_align_tilt_tol_rad)
+            if self._piece_tilt(env, device) > tol >= self._grasp_tilt:
+                self._cut(f"decide: the grasp of {name} tipped it in the jaws")
+        if holding:
+            return self._decide_holding(env, device, motion)
+        return self._decide_empty(env, device, motion)
+
+    def _decide_holding(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        shape = self._current_shape(env)
+        if not self._has_box(env):
+            # --goal_object smoke test: no box, so picking it up was the whole test.
+            print(f"[CuroboPolicy] decide: grasped {shape.name}, and there is no box → HOME.")
+            self._finish_piece(shape)
+            self._phase = Phase.HOME
+            return self._step_home(env, device, motion)
+        if self._miss_cut_in is not None:
+            # A pretended grasp (attached at the bottom, in _after_close): carry the
+            # "piece" toward its hole until GO notices. Tilt, budgets and parking mean
+            # nothing for a piece that is not really there.
+            if self._plan_go(env, device, motion, Goal.INSERT):
+                return self._start_go(env, device, motion)
+            self._miss_cut_in = None
+            self._jaw_cmd = float(self.config.jaw_open)
+            self._cut("decide: nowhere to carry the pretended grasp — noticing the miss now")
+            return self._decide_empty(env, device, motion)
+
+        # Re-measured every time: the piece may have moved in the jaws since the grasp — a
+        # failed insert means exactly that — and aiming from a stale offset repeats the
+        # same miss. After a fresh grasp it is simply the first measurement.
+        motion.attach(env, device, shape.name)
+        tilt = self._piece_tilt(env, device)
+        goal = next_goal(
+            holding=True,
+            upright=tilt <= float(self.config.insert_align_tilt_tol_rad),
+            insert_tries_left=self._insert_tries_left(),
+        )
+        if goal == "insert" and self._plan_go(env, device, motion, Goal.INSERT):
+            return self._start_go(env, device, motion)
+
+        why = "no insert plan" if goal == "insert" else (
+            f"tilted {math.degrees(tilt):.0f}°" if tilt > self.config.insert_align_tilt_tol_rad
+            else "out of insert tries"
+        )
+        if goal == "insert":
+            # Lifted it and cannot place it: putting it back down is not a demonstration.
+            self._cut(f"decide: no insert plan for {shape.name}")
+        print(f"[CuroboPolicy] decide: parking {shape.name} ({why}).")
+        if self._plan_go(env, device, motion, Goal.PARK):
+            return self._start_go(env, device, motion)
+        self._cut(f"decide: nowhere to put {shape.name} down — letting go here")
+        self._goal = Goal.PARK
+        return self._start_jaw(env, device, motion, self.config.jaw_open)
+
+    def _decide_empty(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> torch.Tensor:
+        motion.detach()  # nothing in the jaws: every piece is an obstacle again
+        todo = self._pending(env)
+        while todo:
+            shape = todo[0]
+            in_box = self._piece_inserted(env, require_settled=False)
+            lying = not in_box and self._piece_lying_down(env, device)
+            goal = next_goal(
+                holding=False,
+                in_box=in_box,
+                lying_down=lying,
+                insert_tries_left=self._insert_tries_left(),
+                grasp_tries_left=self._grasp_attempts < max(1, int(self.config.max_grasp_retries)),
+            )
+            if goal == "finish":
+                self._finish_piece(shape)
+                continue
+            if goal == "grasp" and self._plan_go(env, device, motion, Goal.GRASP):
+                self._grasp_attempts += 1
+                return self._start_go(env, device, motion)
+            why = "no grasp plan" if goal == "grasp" else ("lying on its side" if lying else "out of tries")
+            if not self._defer_piece(shape, why):
+                break
+
+        if not todo:
+            print("[CuroboPolicy] decide: every piece is in the box → HOME.")
+            self._phase = Phase.HOME
+            return self._step_home(env, device, motion)
+        print(
+            f"[CuroboPolicy] decide: {len(todo)} piece(s) left and none workable since the "
+            f"last one went in → DONE."
+        )
+        self._phase = Phase.DONE
+        return self._hold(env, device, motion)
+
+    def _finish_piece(self, shape: ShapeInfo) -> None:
+        """The current piece is in the box: confirm the recording and move on."""
+        assert self._todo is not None and self._todo[0] is shape
+        self._todo.pop(0)
+        # Confirmed here, with the arm clear of the box, which is also where the next clip
+        # has to start from.
+        self._demo_events.append("checkpoint")
+        self._stalled = 0
+        self._grasp_attempts = self._insert_attempts = 0
+        print(f"[CuroboPolicy] decide: {shape.name} is in the box ({len(self._todo)} left).")
+
+    def _defer_piece(self, shape: ShapeInfo, reason: str) -> bool:
+        """Send the current piece to the back of the queue.
+
+        False once every remaining piece has been deferred since the last one went in:
+        nothing about the scene has changed since, so trying again would repeat itself.
+        """
+        assert self._todo is not None and self._todo[0] is shape
+        if self._grasp_attempts or self._insert_attempts:
+            # It was tried and it did not work out: whatever was recorded since the last
+            # cut (lifting it back out, parking it) leads nowhere, and "put it down and
+            # walk away" would contradict the recoveries recorded from the same states.
+            self._cut(f"decide: giving up on {shape.name} for now")
+        self._todo.append(self._todo.pop(0))
+        self._stalled += 1
+        self._grasp_attempts = self._insert_attempts = 0
+        print(
+            f"[CuroboPolicy] decide: deferring {shape.name} ({reason}); "
+            f"{self._stalled}/{len(self._todo)} deferred since the last insert."
+        )
+        return self._stalled < len(self._todo)
+
+    def _insert_failed(self, reason: str) -> None:
+        """Book a placement that will not end in the box: cut the clip, spend a try.
+
+        The physical recovery always runs — it has to, the piece is in or over the box.
+        The budget is enforced by ``_decide``, which parks the piece once it is spent.
+        """
+        self._insert_attempts += 1
+        self._cut(
+            f"{reason} — insert recovery "
+            f"{self._insert_attempts}/{self.config.max_insert_retries}"
+        )
+
+    def _cut(self, reason: str) -> None:
+        """Drop everything recorded since the last checkpoint; this step starts a new clip."""
+        self._demo_events.append("cut")
+        self._attempt_cut = True
+        print(f"[CuroboPolicy] {reason} → cut.")
+
+    def _insert_tries_left(self) -> bool:
+        return self._insert_attempts <= max(0, int(self.config.max_insert_retries))
+
+    def _holding(self, env: gym.Env, device: torch.device, motion: MotionClient) -> bool:
+        """Something is between the closed jaws — measured, not remembered."""
+        if self._jaw_cmd != float(self.config.jaw_closed):
+            return False
+        return not self._jaw_is_fully_closed(motion.measured_jaw(env, device))
+
+    def _pending(self, env: gym.Env) -> list[ShapeInfo]:
+        """Pieces not yet in the box, current one first. Built on first use."""
+        if self._todo is None:
+            cfg_shapes = getattr(env.unwrapped.cfg, "shapes", None)
+            if cfg_shapes:
+                self._todo = list(cfg_shapes)
+                if self._has_box(env):
+                    # Whatever starts on the box — stuck in its hole, fallen onto the lid —
+                    # goes first: it is what a policy that let go in the wrong place faces
+                    # next, and left for later it gets knocked about by the other inserts.
+                    # Once, here: re-sorting at every decision would undo deferrals.
+                    device = torch.device(env.unwrapped.device)
+                    on_box = {s.name for s in self._todo if self._on_the_box(env, device, s.name)}
+                    self._todo.sort(key=lambda s: s.name not in on_box)
+            elif self.config.goal_object:
+                self._todo = [ShapeInfo(prim_path=f"{{ENV_REGEX_NS}}/{self.config.goal_object}")]
+            else:
+                raise ValueError(
+                    "CuroboPolicy needs env.cfg.shapes (from ShapeSortingEnvironment) "
+                    "or --goal_object <scene_entity_name>."
+                )
+        return self._todo
+
+    def _current_shape(self, env: gym.Env) -> ShapeInfo:
+        return self._pending(env)[0]
+
+    # ------------------------------------------------------------------
+    # Planning — whole approaches, best candidate first
+    # ------------------------------------------------------------------
+
+    def _plan_go(
+        self, env: gym.Env, device: torch.device, motion: MotionClient, goal: Goal
+    ) -> bool:
+        """Plan the hover move and the descent for the first candidate where both work.
+
+        Both legs plan before anything moves, so a candidate can never strand the arm
+        halfway, and the descent is planned from the hover plan's own end state. For an
+        insert the box is hidden for the descent only: its last few mm sit inside the
+        planner's collision margin around the lid, where the optimiser would otherwise
+        buy clearance by drifting off the hole axis.
+        """
+        make = {
+            Goal.GRASP: self._grasp_candidates,
+            Goal.INSERT: self._insert_candidates,
+            Goal.PARK: self._park_candidates,
+        }[goal]
+        candidates = make(env, device, motion)
+        hide = self._box_entity_name(env) if goal is Goal.INSERT else None
+        shape = self._current_shape(env)
+        for i, (label, hover, contact) in enumerate(candidates):
+            tag = f"{goal.name} {shape.name} [{i + 1}/{len(candidates)} {label}]"
+            move = motion.plan_to_pose(env, device, *hover, label=f"{tag} hover")
+            if not move.success:
+                continue
+            with motion.obstacles_hidden(hide):
+                descent = motion.plan_to_pose(
+                    env, device, *contact, label=f"{tag} descent", start=move.waypoints[-1]
+                )
+            if not descent.success:
+                continue
+            self._goal = goal
+            self._attempt_cut = False
+            self._traj = torch.cat([move.waypoints, descent.waypoints])
+            self._descent_start = int(move.waypoints.shape[0])
+            self._step_idx = 0
+            print(f"[CuroboPolicy] {tag}: planned.")
+            return True
+        print(
+            f"[CuroboPolicy] {goal.name} {shape.name}: none of {len(candidates)} "
+            f"candidate(s) planned."
+        )
+        return False
+
+    def _grasp_candidates(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> list[Candidate]:
+        """One grasp per jaw yaw that squeezes two flats of the piece as it lies now."""
+        shape = self._current_shape(env)
+        xyz, quat_xyzw = self._piece_pose(env, device)
+        px, py = float(xyz[0]), float(xyz[1])
+        z = float(xyz[2]) + float(self.config.grasp_height_m)
+        box = self._box_footprint(env, device) if self._has_box(env) else None
+        if box is not None and box.outside_by((px, py)) < 0.0:
+            # On the lid or wedged in a hole: grip it higher up rather than put the
+            # fingertips through the lid, which no candidate would plan.
+            z = max(z, box.lid_z + _FINGERTIP_BELOW_TOOL_M + _LID_FINGERTIP_CLEARANCE_M)
+
+        self._grasp_tilt = _tilt_of(quat_xyzw)
+        radial = math.atan2(py, px)
+        yaws = grasp_jaw_yaws(
+            quat_xyzw,
+            self._face_normals(shape),
+            radial_yaw=radial,
+            max_tilt=float(self.config.insert_align_tilt_tol_rad),
+        )
+        out = [
+            self._grasp_candidate(px, py, z, yaw, f"jaw {math.degrees(_wrap_to_pi(yaw - radial)):+.0f}°", device)
+            for yaw in yaws
+        ]
+        dx, dy = self._sample_grasp_offset()
+        if (dx, dy) != (0.0, 0.0) and yaws:
+            # First in line, with the true candidates behind it: a perturbed grasp that
+            # does not plan falls back to a correct one instead of deferring the piece.
+            print(f"[CuroboPolicy] GRASP perturbed on purpose by ({dx:+.3f}, {dy:+.3f}) m.")
+            out.insert(0, self._grasp_candidate(px + dx, py + dy, z, yaws[0], "perturbed", device))
+        return out
+
+    def _grasp_candidate(
+        self, px: float, py: float, z: float, jaw_yaw: float, label: str, device: torch.device
+    ) -> Candidate:
+        tool_x, tool_y, roll = grasp_tool_xy_roll(px, py, jaw_yaw, _GOAL_XY_STANDOFF_M)
+        contact = so101_ee_pose_xyzw(tool_x, tool_y, z, tilt=_GOAL_TILT_RAD, roll=roll, device=device)
+        hover = so101_ee_pose_xyzw(
+            tool_x, tool_y, z + float(self.config.approach_height_m),
+            tilt=_GOAL_TILT_RAD, roll=roll, device=device,
+        )
+        return label, hover, contact
+
+    def _insert_candidates(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> list[Candidate]:
+        """One placement over the hole per roll that lines the held piece up with it."""
+        hole, _ = self._hole_pose_in_robot_base(env, device)
+        rolls = self._place_roll_candidates(env, device, motion)
+
+        def candidate(label: str, base: torch.Tensor, roll: float) -> Candidate:
+            return (
+                label,
+                self._place_pose_in_robot_base(
+                    env, device, motion, roll=roll,
+                    obj_desired=_raised(base, self.config.place_hover_z_offset_m),
+                ),
+                self._place_pose_in_robot_base(
+                    env, device, motion, roll=roll,
+                    obj_desired=_raised(base, self.config.place_z_offset_m),
+                ),
+            )
+
+        out = [candidate(f"roll {math.degrees(r):+.0f}°", hole, r) for r in rolls]
+        dx, dy, dyaw = self._sample_place_perturb()
+        if (dx, dy, dyaw) != (0.0, 0.0, 0.0) and rolls:
+            # First in line, with the true candidates behind it — same as the grasp: a
+            # perturbed placement that does not plan falls back to a correct one instead
+            # of parking a piece that was held perfectly well.
+            print(
+                f"[CuroboPolicy] INSERT perturbed on purpose by ({dx:+.3f}, {dy:+.3f}) m "
+                f"and {math.degrees(dyaw):+.0f}° — expect an insert recovery."
+            )
+            shifted = hole.clone()
+            shifted[0] += dx
+            shifted[1] += dy
+            out.insert(0, candidate("perturbed", shifted, _wrap_to_pi(rolls[0] + dyaw)))
+        return out
+
+    def _park_candidates(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
+    ) -> list[Candidate]:
+        """Down onto the best few free table spots (:func:`park_spots`), a few wrist rolls each."""
+        if not self._has_box(env):
+            return []
+        box = self._box_footprint(env, device)
+        todo = self._pending(env)
+        here = entity_position_in_robot_base(env, todo[0].name, device=device)
+        others = [entity_position_in_robot_base(env, s.name, device=device) for s in todo[1:]]
+        spots = park_spots(
+            box,
+            here_xy=(float(here[0]), float(here[1])),
+            others_xy=[(float(o[0]), float(o[1])) for o in others],
+        )[:_PARK_MAX_SPOTS]
+        # Resting height for an upright piece. Tipped by t, its lowest bottom corner sits
+        # h·cos t + R·sin t below the origin instead of h, so release that much higher —
+        # it then drops a few mm, lands on a face and comes up level, which is what
+        # parking is for.
+        tilt = self._piece_tilt(env, device)
+        h, r = _PIECE_HALF_HEIGHT_M, _PIECE_MAX_RADIUS_M
+        clearance = _PARK_RELEASE_CLEARANCE_M + max(0.0, h * math.cos(tilt) + r * math.sin(tilt) - h)
+        out: list[Candidate] = []
+        for i, (x, y) in enumerate(spots):
+            base = torch.tensor([x, y, box.table_z + h], device=device, dtype=torch.float32)
+            where = "where it was" if i == 0 and (x, y) == (float(here[0]), float(here[1])) else f"spot {i + 1}"
+            out += [
+                (
+                    f"{where} roll {math.degrees(roll):+.0f}°",
+                    self._place_pose_in_robot_base(
+                        env, device, motion, roll=roll,
+                        obj_desired=_raised(base, self.config.place_hover_z_offset_m),
+                    ),
+                    self._place_pose_in_robot_base(
+                        env, device, motion, roll=roll, obj_desired=_raised(base, clearance)
+                    ),
+                )
+                for roll in (_GOAL_ROLL_RAD, math.pi / 2.0, -math.pi / 2.0)
+            ]
+        return out
+
+    def _face_normals(self, shape: ShapeInfo) -> tuple[float, ...] | None:
+        try:
+            return face_normal_yaws(self._shape_form(shape))
+        except RuntimeError:
+            return None  # --goal_object: not a shape piece, grasp it like a round one
+
+    def _sample_grasp_offset(self) -> tuple[float, float]:
+        """XY offset for this attempt: only a piece's very first attempt is perturbed.
+
+        Re-grasping during an insert recovery counts as a retry, so it is never
+        perturbed either: stacking two deliberate mistakes would record a recovery that
+        itself fails, which is the opposite of the demonstration the clip is for.
+        """
+        if self._grasp_attempts != 0 or self._insert_attempts > 0:
+            return (0.0, 0.0)
+        if random.random() >= float(self.config.grasp_perturb_prob):
+            return (0.0, 0.0)
+        m = float(self.config.grasp_perturb_xy_m)
+        return (random.uniform(-m, m), random.uniform(-m, m))
+
+
+    # ------------------------------------------------------------------
+    # Sensing — what the world says, measured each time
+    # ------------------------------------------------------------------
+
+    def _piece_inserted(self, env: gym.Env, *, require_settled: bool = True) -> bool:
+        """Whether the current piece sits inside the box, per the success term.
+
+        ``require_settled=False`` drops the velocity part of that term, which separates
+        "still bouncing in the cavity" from "never got in".
+        """
+        params = getattr(env.unwrapped.cfg, "piece_in_box_params", None)
+        if params is None:
+            return False  # --goal_object smoke test: no box for anything to be in.
+
+        from isaaclab.managers import SceneEntityCfg
+        from shape_sorting.predicates import objects_centers_inside_aabb
+
+        per_piece = {
+            **params,
+            "object_cfg_list": [SceneEntityCfg(self._current_shape(env).name)],
+        }
+        if not require_settled:
+            per_piece["velocity_threshold"] = float("inf")
+        return bool(objects_centers_inside_aabb(env.unwrapped, **per_piece)[0])
+
+    def _insert_misaligned(self, env: gym.Env, device: torch.device) -> str | None:
+        """Why the gripped piece would not drop into its hole, or None if it would."""
+        if not self._has_box(env):
+            return None  # --goal_object smoke test: no hole to line up with.
+
+        shape = self._current_shape(env)
+        obj_xyz, obj_quat_xyzw = self._piece_pose(env, device)
+        hole_pos, hole_quat = self._hole_pose_in_robot_base(env, device)
+        xy, yaw, tilt = alignment_error(
+            obj_xyz,
+            obj_quat_xyzw,
+            hole_pos,
+            hole_quat,
+            symmetry_order=yaw_symmetry_order(self._shape_form(shape)),
+        )
+        # Logged on every insert, not just the failures: this is the only place the
+        # natural alignment spread is observable, and the tolerances above need it.
+        print(
+            f"[CuroboPolicy] INSERT alignment: xy={xy * 1000:.1f} mm "
+            f"yaw={math.degrees(yaw):.1f}° tilt={math.degrees(tilt):.1f}°"
+        )
+        cfg = self.config
+        if xy > float(cfg.insert_align_xy_tol_m):
+            return f"{xy * 1000:.0f} mm off the hole axis"
+        if yaw > float(cfg.insert_align_yaw_tol_rad):
+            return f"yawed {math.degrees(yaw):.0f}° against the hole"
+        if tilt > float(cfg.insert_align_tilt_tol_rad):
+            return f"tilted {math.degrees(tilt):.0f}° (caught on the rim)"
+        return None
+
+    def _piece_tilt(self, env: gym.Env, device: torch.device) -> float:
+        """Angle between the current piece's own +Z and the base +Z [rad]."""
+        return _tilt_of(self._piece_pose(env, device)[1])
+
+    def _piece_pose(self, env: gym.Env, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """The current piece's ``(position (3,), quat_xyzw (4,))`` in the robot base frame.
+
+        The one place piece orientation is read, so that a cube on its side reads as the
+        standing cube it is (:func:`cube_standing_quat`).
+        """
+        from isaaclab.utils.math import convert_quat
+
+        shape = self._current_shape(env)
+        pose = entity_pose_in_robot_base(env, shape.name, device=device)
+        quat = convert_quat(pose.quaternion.view(-1)[:4], to="xyzw")
+        # ponytail: assumes piece_height == piece_size (the defaults); a taller or flatter
+        # "cube" is not the same solid on its side, and needs this switched off.
+        if shape.name == f"shape_piece_{ShapeForm.CUBE.value}":
+            quat = cube_standing_quat(quat)
+        return pose.position.view(3), quat
+
+    def _piece_lying_down(self, env: gym.Env, device: torch.device) -> bool:
+        """On its side on the table — the one pose parking cannot level (see _LYING_TILT_RAD).
+
+        Anything tipped less is leaning on something — the rim of its hole, the box, a
+        neighbour — and is grasped where it is. So is a steeper piece on the box: stuck
+        deep in its hole, it is worth pulling out and setting down; if it lands on its
+        side, it is on the table and this says so next time. Never true for the cube.
+        """
+        if self._piece_tilt(env, device) <= _LYING_TILT_RAD:
+            return False
+        name = self._current_shape(env).name
+        return not (self._has_box(env) and self._on_the_box(env, device, name))
+
+    def _on_the_box(self, env: gym.Env, device: torch.device, name: str) -> bool:
+        """Over the cavity's footprint: on the lid, stuck in a hole, or already in the box."""
+        xyz = entity_position_in_robot_base(env, name, device=device)
+        return self._box_footprint(env, device).outside_by((float(xyz[0]), float(xyz[1]))) < 0.0
+
+    def _world_still(self, env: gym.Env) -> bool:
+        """Nothing that ``_decide`` looks at is moving: the pieces left, and the box."""
+        import warp as wp
+
+        todo = self._pending(env)
+        held = self._jaw_cmd == float(self.config.jaw_closed) or self._miss_cut_in is not None
+        names = [s.name for s in (todo[1:] if held else todo)]  # the held one moves with the arm
+        if self._has_box(env):
+            names.append(self._box_entity_name(env))
+        scene = env.unwrapped.scene
+        return all(
+            float(torch.linalg.vector_norm(wp.to_torch(scene[n].data.root_lin_vel_w)[0]))
+            < _STILL_SPEED_M_S
+            for n in names
+        )
+
+    def _box_footprint(self, env: gym.Env, device: torch.device) -> BoxFootprint:
+        """Where the box, its cavity, its lid and the table under it are, right now."""
+        from isaaclab.utils.math import convert_quat
+
+        pose = entity_pose_in_robot_base(env, self._box_entity_name(env), device=device)
+        xyz = pose.position.view(3)
+        lid_z = float(self._hole_pose_in_robot_base(env, device)[0][2])
+        params = env.unwrapped.cfg.piece_in_box_params
+        lo, hi = params["aabb_min"], params["aabb_max"]
+        return BoxFootprint(
+            center=(float(xyz[0]), float(xyz[1])),
+            yaw=self._yaw_from_quat_xyzw(convert_quat(pose.quaternion.view(-1)[:4], to="xyzw")),
+            lo=(float(lo[0]), float(lo[1])),
+            hi=(float(hi[0]), float(hi[1])),
+            lid_z=lid_z,
+            table_z=2.0 * float(xyz[2]) - lid_z,
+        )
+
+    @staticmethod
+    def _has_box(env: gym.Env) -> bool:
+        """False in the ``--goal_object`` smoke test, which has no box."""
+        return getattr(env.unwrapped.cfg, "piece_in_box_params", None) is not None
+
+    @staticmethod
+    def _box_entity_name(env: gym.Env) -> str:
+        """Scene entity name of the sorting box, from the success-term container."""
+        params = getattr(env.unwrapped.cfg, "piece_in_box_params", None)
+        if params is None:
+            raise RuntimeError("Sorting box unknown: env.cfg.piece_in_box_params is missing.")
+        return str(params["container_cfg"].name)
+
+    def _sample_place_perturb(self) -> tuple[float, float, float]:
+        """``(dx, dy, dyaw)`` misalignment built into this placement on purpose.
+
+        Only a piece's first placement is ever perturbed, so every recorded recovery
+        ends in a correct demonstration. Mirrors :meth:`_sample_grasp_offset`.
+        """
+        if self._insert_attempts > 0:
+            return (0.0, 0.0, 0.0)
+        if random.random() >= float(self.config.place_perturb_prob):
+            return (0.0, 0.0, 0.0)
+        m = float(self.config.place_perturb_xy_m)
+        yaw = float(self.config.place_perturb_yaw_rad)
+        return (random.uniform(-m, m), random.uniform(-m, m), random.uniform(-yaw, yaw))
+
+    def _sample_miss_notice_delay(self) -> int:
+        """Steps to keep carrying an empty gripper before noticing the miss."""
+        return random.randint(0, max(0, int(self.config.miss_notice_delay_max_steps)))
 
     # ------------------------------------------------------------------
     # Motion client + debug wiring
@@ -767,7 +1598,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def _update_kit_markers(
         self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> None:
-        if self._kit_markers is None:
+        if self._kit_markers is None or motion.last_goal_xyz is None:
             return
         self._kit_markers.ensure(env, motion.tool_frame)
         goal_pos_w, goal_quat = self._goal_pose_w(env, device, motion)
@@ -775,64 +1606,24 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             env, device, goal_pos_w=goal_pos_w, goal_quat_xyzw=goal_quat
         )
 
-    # ------------------------------------------------------------------
-    # Goal poses (task-level; still on the policy until PoseStrategy extract)
-    # ------------------------------------------------------------------
-
-    def _resolve_shapes(self, env: gym.Env) -> list[ShapeInfo]:
-        if self._shapes is not None:
-            return self._shapes
-
-        cfg_shapes = getattr(env.unwrapped.cfg, "shapes", None)
-        if cfg_shapes:
-            self._shapes = list(cfg_shapes)
-        elif self.config.goal_object:
-            self._shapes = [ShapeInfo(prim_path=f"{{ENV_REGEX_NS}}/{self.config.goal_object}")]
-        else:
-            raise ValueError(
-                "CuroboPolicy needs env.cfg.shapes (from ShapeSortingEnvironment) "
-                "or --goal_object <scene_entity_name>."
-            )
-        if self._shape_idx >= len(self._shapes):
-            self._shape_idx = 0
-        return self._shapes
-
-    def _current_shape(self, env: gym.Env) -> ShapeInfo:
-        return self._resolve_shapes(env)[self._shape_idx]
-
-    def _grasp_pose_in_robot_base(
-        self,
-        env: gym.Env,
-        device: torch.device,
-        *,
-        xy_offset: tuple[float, float] = (0.0, 0.0),
+    def _goal_pose_w(
+        self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Grasp EE pose: XY standoff on base→object line, fixed Z.
+        """World-frame pose of the last planned goal, for the Kit markers."""
+        import warp as wp
+        from isaaclab.utils.math import combine_frame_transforms
 
-        ``xy_offset`` shifts the *target* XY before the standoff and before the pose is
-        built, so the tool yaw stays consistent with the offset position. Offsetting the
-        finished goal instead would ask for a yaw this 5-DoF arm cannot reach.
-        """
-        shape = self._current_shape(env)
-        obj_b = entity_position_in_robot_base(env, shape.name, device=device)
-        xy = obj_b[0:2]
-        if xy_offset != (0.0, 0.0):
-            xy = xy + torch.tensor(xy_offset, device=device, dtype=xy.dtype)
-        rho = torch.linalg.norm(xy)
-        if float(rho) < 1e-6:
-            raise RuntimeError(
-                f"CuroboPolicy: shape '{shape.name}' is directly above "
-                "the robot base; cannot define a horizontal approach line."
-            )
-        xy_goal = xy * (1.0 - _GOAL_XY_STANDOFF_M / rho)
-        return so101_ee_pose_xyzw(
-            float(xy_goal[0]),
-            float(xy_goal[1]),
-            float(self.config.grasp_z_m),
-            tilt=_GOAL_TILT_RAD,
-            roll=_GOAL_ROLL_RAD,
-            device=device,
-        )
+        assert motion.last_goal_xyz is not None and motion.last_goal_quat_xyzw is not None
+        num_envs = env.unwrapped.num_envs
+        robot = env.unwrapped.scene["robot"]
+        robot_pose_w = wp.to_torch(robot.data.root_pose_w).to(device=device, dtype=torch.float32)
+        t = motion.last_goal_xyz.unsqueeze(0).expand(num_envs, -1)
+        q = motion.last_goal_quat_xyzw.unsqueeze(0).expand(num_envs, -1)
+        return combine_frame_transforms(robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], t, q)
+
+    # ------------------------------------------------------------------
+    # Goal poses
+    # ------------------------------------------------------------------
 
     def _shape_form(self, shape: ShapeInfo) -> ShapeForm:
         prefix = "shape_piece_"
@@ -906,10 +1697,6 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         _, _, yaw = euler_xyz_from_quat(quat_xyzw.reshape(1, 4))
         return float(yaw[0])
 
-    @staticmethod
-    def _wrap_to_pi(angle: float) -> float:
-        return (angle + math.pi) % (2.0 * math.pi) - math.pi
-
     def _place_roll_candidates(
         self, env: gym.Env, device: torch.device, motion: MotionClient
     ) -> list[float]:
@@ -931,11 +1718,9 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             device=device,
         )
 
-        shape = self._current_shape(env)
-        obj_pose = entity_pose_in_robot_base(env, shape.name, device=device)
         from isaaclab.utils.math import convert_quat
 
-        obj_quat_xyzw = convert_quat(obj_pose.quaternion.view(-1)[:4], to="xyzw")
+        _, obj_quat_xyzw = self._piece_pose(env, device)
         q_ee = motion.ee_pose(motion.planner_joint_state(env, device))
         ee_quat_xyzw = convert_quat(q_ee.quaternion.view(-1)[:4], to="xyzw")
 
@@ -943,10 +1728,10 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         psi_obj = self._yaw_from_quat_xyzw(obj_quat_xyzw)
         psi_ee = self._yaw_from_quat_xyzw(ee_quat_xyzw)
         psi_ee0 = self._yaw_from_quat_xyzw(quat_ee0)
-        psi_rel = self._wrap_to_pi(psi_obj - psi_ee)
-        roll_0 = self._wrap_to_pi(psi_hole - psi_ee0 - psi_rel)
+        psi_rel = _wrap_to_pi(psi_obj - psi_ee)
+        roll_0 = _wrap_to_pi(psi_hole - psi_ee0 - psi_rel)
 
-        rolls = [self._wrap_to_pi(roll_0 + dyaw) for dyaw in place_yaw_offsets(form)]
+        rolls = [_wrap_to_pi(roll_0 + dyaw) for dyaw in place_yaw_offsets(form)]
         rolls.sort(key=lambda r: abs(r))
         return rolls
 
@@ -957,21 +1742,21 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         motion: MotionClient,
         *,
         roll: float,
-        z_offset: float,
+        obj_desired: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Place EE so the grasped object origin sits ``z_offset`` above the lid hole."""
+        """Place EE so the grasped object origin lands on ``obj_desired`` (robot base).
+
+        Target-agnostic: ``_place_goal`` decides whether that point is above a lid hole
+        or above the piece's parking spot on the table.
+        """
         from isaaclab.utils.math import quat_apply
 
         if motion.grasp_offset_ee is None:
             raise RuntimeError(
-                "CuroboPolicy PLACE requires a grasp offset; ATTACH must run first."
+                "CuroboPolicy: placing needs a grasp offset — attach() the held piece first."
             )
 
-        hole_b, _ = self._hole_pose_in_robot_base(env, device)
-        obj_desired = hole_b.clone()
-        obj_desired[2] = obj_desired[2] + float(z_offset)
-
-        # Seed EE orientation from hole XY + roll, then back out EE position so
+        # Seed EE orientation from the goal XY + roll, then back out EE position so
         # R @ grasp_offset places the object at obj_desired.
         _, quat_seed = so101_ee_pose_xyzw(
             float(obj_desired[0]),
@@ -995,60 +1780,3 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
             roll=roll,
             device=device,
         )
-
-    def _plan_place(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> PlanResult:
-        """Plan PLACE over yaw-symmetry roll candidates until one succeeds."""
-        form = self._shape_form(self._current_shape(env))
-        rolls = self._place_roll_candidates(env, device, motion)
-        print(
-            f"[CuroboPolicy] PLACE {form.value}: trying {len(rolls)} yaw candidate(s) "
-            f"(rolls deg={[round(math.degrees(r), 1) for r in rolls]})."
-        )
-        last_plan: PlanResult | None = None
-        for i, roll in enumerate(rolls):
-            goal_xyz, goal_quat = self._place_pose_in_robot_base(
-                env, device, motion, roll=roll,
-                z_offset=self.config.place_hover_z_offset_m,
-            )
-            plan = motion.plan_to_pose(
-                env,
-                device,
-                goal_xyz,
-                goal_quat,
-                label=f"PLACE[{i + 1}/{len(rolls)} roll={math.degrees(roll):.1f}°]",
-            )
-            last_plan = plan
-            self._place_roll = roll  # INSERT descends straight down from this pose
-            if plan.success:
-                print(
-                    f"[CuroboPolicy] PLACE succeeded with roll={math.degrees(roll):.1f}° "
-                    f"(candidate {i + 1}/{len(rolls)})."
-                )
-                return plan
-        assert last_plan is not None
-        print(
-            f"[CuroboPolicy] PLACE failed for all {len(rolls)} yaw candidate(s)."
-        )
-        return last_plan
-
-    def _goal_pose_w(
-        self, env: gym.Env, device: torch.device, motion: MotionClient
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """World-frame active goal for Kit markers."""
-        import warp as wp
-        from isaaclab.utils.math import combine_frame_transforms
-
-        num_envs = env.unwrapped.num_envs
-        if motion.last_goal_xyz is None or motion.last_goal_quat_xyzw is None:
-            goal_b, goal_quat_xyzw = self._grasp_pose_in_robot_base(env, device)
-        else:
-            goal_b = motion.last_goal_xyz
-            goal_quat_xyzw = motion.last_goal_quat_xyzw
-
-        robot = env.unwrapped.scene["robot"]
-        robot_pose_w = wp.to_torch(robot.data.root_pose_w).to(device=device, dtype=torch.float32)
-        t = goal_b.unsqueeze(0).expand(num_envs, -1)
-        q = goal_quat_xyzw.unsqueeze(0).expand(num_envs, -1)
-        return combine_frame_transforms(robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], t, q)
