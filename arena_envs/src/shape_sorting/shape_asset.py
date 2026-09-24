@@ -61,7 +61,7 @@ def make_shape_piece_spawn_cfg(
     )
 
 
-def make_sorting_box_spawn_cfg(parts) -> ProceduralAssemblyCfg:
+def make_sorting_box_spawn_cfg(parts, mass: float = 0.35) -> ProceduralAssemblyCfg:
     """Physics/visual spawn settings for the multi-part sorting box."""
     return ProceduralAssemblyCfg(
         parts=parts,
@@ -73,7 +73,7 @@ def make_sorting_box_spawn_cfg(parts) -> ProceduralAssemblyCfg:
             disable_gravity=False,
         ),
         collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005),
-        mass_props=sim_utils.MassPropertiesCfg(mass=0.35),
+        mass_props=sim_utils.MassPropertiesCfg(mass=mass),
         activate_contact_sensors=True,
     )
 
@@ -177,6 +177,7 @@ class SortingBox(Object):
         bottom_thickness: float = 0.006,
         hole_gap: float = 0.012,
         hole_chamfer: float = DEFAULT_HOLE_CHAMFER,
+        mass: float = 0.35,
         instance_name: str | None = None,
         prim_path: str | None = None,
         initial_pose: Pose | None = None,
@@ -197,6 +198,7 @@ class SortingBox(Object):
         self.bottom_thickness = bottom_thickness
         self.hole_gap = hole_gap
         self.hole_chamfer = hole_chamfer
+        self.mass = mass
 
         self._parts, self.hole_centers, self._cavity_aabb = build_sorting_box_parts(
             forms=self.forms,
@@ -274,7 +276,7 @@ class SortingBox(Object):
     def _generate_rigid_cfg(self) -> RigidObjectCfg:
         cfg = RigidObjectCfg(
             prim_path=self.prim_path,
-            spawn=make_sorting_box_spawn_cfg(self._parts),
+            spawn=make_sorting_box_spawn_cfg(self._parts, self.mass),
             **self.asset_cfg_addon,
         )
         return self._add_initial_pose_to_cfg(cfg)
@@ -332,6 +334,7 @@ def make_shape_sorting_layout(
     hole_gap: float = 0.012,
     edge_chamfer: float = DEFAULT_EDGE_CHAMFER,
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER,
+    box_mass: float = 0.35,
 ) -> ShapeSortingLayout:
     """Build a sorting box and matching pieces from shared sizing parameters.
 
@@ -353,6 +356,7 @@ def make_shape_sorting_layout(
         bottom_thickness=bottom_thickness,
         hole_gap=hole_gap,
         hole_chamfer=hole_chamfer,
+        mass=box_mass,
     )
     pieces = [
         ShapePiece(

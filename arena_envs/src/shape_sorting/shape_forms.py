@@ -11,6 +11,7 @@ piece has the same plan-view area.
 
 from __future__ import annotations
 
+import functools
 import math
 from collections.abc import Sequence
 from enum import Enum
@@ -84,6 +85,34 @@ def place_yaw_offsets(form: ShapeForm) -> tuple[float, ...]:
     if order is None:
         return (0.0,)
     return tuple(2.0 * math.pi * i / order for i in range(order))
+
+
+@functools.cache
+def face_normal_yaws(form: ShapeForm) -> tuple[float, ...] | None:
+    """Outward normals [rad] of the piece's flat side faces, in the piece's own frame.
+
+    ``None`` for a round piece, which has no flats. A parallel gripper squeezing along one
+    of these grips two flats instead of two corners. Not the same angles as
+    :func:`place_yaw_offsets`: those step through the symmetry from yaw 0, which for the
+    hexagon is a *vertex* direction — its flats sit at 30° + k·60°.
+
+    Read off the same profile the pieces are built from, so it cannot drift from the
+    geometry.
+    """
+    with BuildSketch() as sketch:
+        add_form_profile(form, 1.0)
+    normals_deg: set[float] = set()  # snapped to 0.5°: exact for the regular forms, and
+    for edge in sketch.sketch.edges():  # it merges the star's near-parallel notch faces
+        a, b = edge.start_point(), edge.end_point()
+        dx, dy = b.X - a.X, b.Y - a.Y
+        if abs(math.hypot(dx, dy) - edge.length) > 1e-9:
+            continue  # curved edge (the cylinder's rim): not a flat
+        mx, my = (a.X + b.X) / 2, (a.Y + b.Y) / 2
+        yaw = math.atan2(-dx, dy)
+        if math.cos(yaw) * mx + math.sin(yaw) * my < 0:
+            yaw += math.pi  # the profile is centred, so outward points away from origin
+        normals_deg.add(round(math.degrees(yaw) % 360.0 * 2.0) / 2.0 % 360.0)
+    return tuple(math.radians(d) for d in sorted(normals_deg)) or None
 
 
 def _center_on_origin(solid):

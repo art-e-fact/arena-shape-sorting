@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -80,6 +81,112 @@ def _apply_control_rate(env_cfg, control_hz: float) -> None:
     assert abs(step_hz - control_hz) < 1e-6, f"step rate {step_hz} != control_hz {control_hz}"
 
 
+def drop_piece_on_hole(
+    env,
+    env_ids,
+    prob: float,
+    box_name: str,
+    holes: dict[str, tuple[float, float, float, float, float]],
+    xy_m: float = 0.010,
+    yaw_rad: float = math.radians(30.0),
+    tilt_rad: tuple[float, float] = (0.0, math.radians(15.0)),
+    gap_m: float = 0.005,
+) -> None:
+    """Reset event: with ``prob``, start one random piece falling onto its own lid hole.
+
+    Registered after Arena's placement event, so the box already stands where this episode
+    has it. ``holes`` maps each piece to its hole centre in the box frame and its own size,
+    ``(hole_x, hole_y, lid_top_z, half_height, radius)``. The chosen piece is posed up to
+    ``xy_m`` off the hole axis, up to ``yaw_rad`` off the hole's orientation, and tipped by
+    ``tilt_rad`` about a random horizontal axis, with its lowest corner ``gap_m`` above the
+    lid. Its table spot is simply left empty.
+
+    Calibration knobs, all of them: they set the mix of "fell in", "wedged" and "on the
+    lid", which is only observable from the policy's logs. A bad release lets go of a
+    piece that is upright in the jaws, and the rim is what tips it — so the offset does the
+    work and the tilt stays small. Live, spawning pieces tipped 20-40° instead often
+    toppled them onto their side (the round one rolls off the rim) — a different state,
+    which :func:`tip_piece_over` produces on purpose.
+    """
+    import torch
+    import warp as wp
+    from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul
+
+    if env_ids is None or len(env_ids) == 0 or prob <= 0.0:
+        return
+    box_pose = wp.to_torch(env.scene[box_name].data.root_pose_w)  # (x, y, z, qx, qy, qz, qw)
+    device = box_pose.device
+    for env_id in env_ids.tolist():
+        if float(torch.rand(())) >= prob:
+            continue
+        box_pos, box_quat = box_pose[env_id, :3], box_pose[env_id, 3:7]
+        name = list(holes)[int(torch.randint(len(holes), ()))]
+        hx, hy, lid_z, half_height, radius = holes[name]
+        u = torch.rand(5).tolist()
+        dx, dy = (2 * u[0] - 1) * xy_m, (2 * u[1] - 1) * xy_m
+        yaw = (2 * u[2] - 1) * yaw_rad
+        tilt = tilt_rad[0] + u[3] * (tilt_rad[1] - tilt_rad[0])
+        axis_yaw = (2 * u[4] - 1) * math.pi
+        q_yaw = quat_from_angle_axis(torch.tensor([yaw]), torch.tensor([[0.0, 0.0, 1.0]]))
+        q_tilt = quat_from_angle_axis(
+            torch.tensor([tilt]), torch.tensor([[math.cos(axis_yaw), math.sin(axis_yaw), 0.0]])
+        )
+        quat = quat_mul(q_tilt, quat_mul(q_yaw, box_quat.cpu().unsqueeze(0)))[0].to(device)
+        hole = box_pos + quat_apply(box_quat, torch.tensor([hx, hy, lid_z], device=device))
+        # Lowest corner of a tipped prism: h·cos t + R·sin t below its origin.
+        lift = gap_m + half_height * math.cos(tilt) + radius * math.sin(tilt)
+        pos = hole + torch.tensor([dx, dy, lift], device=device)
+        ids = torch.tensor([env_id], device=device)
+        piece = env.scene[name]
+        piece.write_root_pose_to_sim(torch.cat([pos, quat]).unsqueeze(0), env_ids=ids)
+        piece.write_root_velocity_to_sim(torch.zeros(1, 6, device=device), env_ids=ids)
+        print(
+            f"[drop_piece_on_hole] env {env_id}: {name} dropped on its hole — "
+            f"tilt {math.degrees(tilt):.0f}°, yaw {math.degrees(yaw):+.0f}°, "
+            f"off ({dx * 1000:+.0f}, {dy * 1000:+.0f}) mm"
+        )
+
+
+def tip_piece_over(
+    env,
+    env_ids,
+    prob: float,
+    pieces: dict[str, tuple[float, float]],
+    gap_m: float = 0.005,
+) -> None:
+    """Reset event: with ``prob``, lay one random piece on its side where it stands.
+
+    ``pieces`` maps each candidate to ``(half_height, radius)``. The piece is turned 90°
+    about a random horizontal axis and dropped from ``gap_m`` above the table, so it
+    settles on whichever side face is nearest — the state a knocked-over piece is in.
+    """
+    import torch
+    import warp as wp
+    from isaaclab.utils.math import quat_from_angle_axis, quat_mul
+
+    if env_ids is None or len(env_ids) == 0 or prob <= 0.0 or not pieces:
+        return
+    for env_id in env_ids.tolist():
+        if float(torch.rand(())) >= prob:
+            continue
+        name = list(pieces)[int(torch.randint(len(pieces), ()))]
+        half_height, radius = pieces[name]
+        piece = env.scene[name]
+        pose = wp.to_torch(piece.data.root_pose_w)[env_id].clone()
+        axis_yaw = (2 * float(torch.rand(())) - 1) * math.pi
+        q_tip = quat_from_angle_axis(
+            torch.tensor([math.pi / 2]), torch.tensor([[math.cos(axis_yaw), math.sin(axis_yaw), 0.0]])
+        )
+        pose[3:7] = quat_mul(q_tip, pose[3:7].cpu().unsqueeze(0))[0].to(pose.device)
+        # Standing, its bottom was half_height below the origin; lying, no point of it is
+        # more than radius below.
+        pose[2] += radius - half_height + gap_m
+        ids = torch.tensor([env_id], device=pose.device)
+        piece.write_root_pose_to_sim(pose.unsqueeze(0), env_ids=ids)
+        piece.write_root_velocity_to_sim(torch.zeros(1, 6, device=pose.device), env_ids=ids)
+        print(f"[tip_piece_over] env {env_id}: {name} laid on its side.")
+
+
 @dataclass(frozen=True)
 class ShapeInfo:
     """Privileged per-piece metadata attached to the manager env cfg.
@@ -115,6 +222,10 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     piece_size: float = 0.03
     piece_height: float = 0.03
     box_height: float = 0.04
+    box_mass: float = 0.35
+    """Sorting box mass [kg]. At 0.35 kg (friction 0.6) about 2 N slides it, and pulling a
+    piece that is wedged in a hole out of it does: 42-45 mm of box drift per run with
+    ``drop_on_hole_prob`` on, against 4-7 mm without — enough that later inserts miss."""
     clearance: float = 0.003
     edge_chamfer: float = DEFAULT_EDGE_CHAMFER
     hole_chamfer: float = DEFAULT_HOLE_CHAMFER
@@ -131,6 +242,25 @@ class ShapeSortingEnvironmentCfg(ArenaEnvironmentCfg):
     stretches the demo in wall-clock time instead. Pair it with the CuroboPolicy pacing
     flags (``--waypoint_stride``, ``--close_steps``, ``--open_steps``, ``--home_steps``)
     to keep the arm's real-world speed."""
+    drop_on_hole_prob: float = 0.0
+    """Probability per episode that one random piece starts dropped onto its own lid hole.
+
+    The piece is let fall from just above the hole, off-centre, yawed and tilted, and
+    physics decides the rest: it drops in, wedges in the hole, or lands on the lid. The
+    last two are what a trained policy leaves behind when it lets go in the wrong place —
+    a state the scripted policy's own inserts never produce, because it checks alignment
+    before letting go. One piece, not each: that is the state being recreated, and live,
+    three pieces on the lid at once left the arm — which cannot lift much above the lid
+    over the box — no collision-free way to carry any of them out. For dataset
+    generation; keep it 0 for evaluation."""
+    tip_over_prob: float = 0.0
+    """Probability per episode that one random piece starts lying on its side.
+
+    A knocked-over piece is the other state a trained policy leaves behind, and one
+    the scripted policy must stand back up before it fits its hole. Never the cube when
+    it is as tall as it is wide: on its side it is the same cube, standing. Applied
+    before ``drop_on_hole_prob``, so the two never fight over one piece. For dataset
+    generation; keep it 0 for evaluation."""
     reset_robot_joint_noise: float = 0.0
     """Uniform ±noise [rad] around the robot's default joint pose at every episode reset.
 
@@ -187,6 +317,7 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             piece_size=cfg.piece_size,
             piece_height=cfg.piece_height,
             box_height=cfg.box_height,
+            box_mass=cfg.box_mass,
             clearance=cfg.clearance,
             edge_chamfer=cfg.edge_chamfer,
             hole_chamfer=cfg.hole_chamfer,
@@ -330,6 +461,34 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
                     "velocity_range": (0.0, 0.0),
                 },
             )
+            # Both added here, after the placement event composed into env_cfg.events, and
+            # events run in the order they were added: box and pieces have their episode
+            # poses. Half-height and plan radius per piece, from its own bounding box.
+            sizes = {}
+            for piece in layout.pieces:
+                bbox = piece.get_bounding_box()
+                half = (bbox.max_point[0] - bbox.min_point[0]) / 2.0
+                sizes[piece.name] = (float(half[2]), float(math.hypot(half[0], half[1])))
+            if cfg.tip_over_prob > 0.0:
+                tippable = {
+                    name: size for name, size in sizes.items()
+                    if not (name.endswith(ShapeForm.CUBE.value) and cfg.piece_height == cfg.piece_size)
+                }
+                env_cfg.events.tip_piece_over = EventTermCfg(
+                    func=tip_piece_over,
+                    mode="reset",
+                    params={"prob": cfg.tip_over_prob, "pieces": tippable},
+                )
+            if cfg.drop_on_hole_prob > 0.0:
+                holes = {
+                    piece.name: (float(hx), float(hy), float(layout.box.lid_top_z), *sizes[piece.name])
+                    for piece, (hx, hy) in zip(layout.pieces, layout.box.hole_centers)
+                }
+                env_cfg.events.drop_piece_on_hole = EventTermCfg(
+                    func=drop_piece_on_hole,
+                    mode="reset",
+                    params={"prob": cfg.drop_on_hole_prob, "box_name": layout.box.name, "holes": holes},
+                )
             if cfg.debug_key_reset:
                 # Truncation (not success): ends the episode so policy_runner resets and continues.
                 env_cfg.terminations.debug_key_reset = TerminationTermCfg(
