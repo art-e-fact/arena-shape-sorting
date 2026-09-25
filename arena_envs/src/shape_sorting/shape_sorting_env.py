@@ -408,6 +408,9 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             background_scene=background,
             episode_length_s=cfg.episode_length_s,
         )
+        # SortMultiObjectTask takes no description. Must match the recorded datasets'
+        # task text: language-conditioned policies (SmolVLA) tokenize it every step.
+        task.task_description = "Insert the shapes into the sorting box."
         cavity = layout.box.get_inner_bounding_box()
         task.termination_cfg.success = TerminationTermCfg(
             func=objects_centers_inside_aabb,
