@@ -2,6 +2,11 @@ project: artefacts/IsaacLab-Arena-experiments
 
 version: 0.1.0
 
+# Run from the repo root after `source setup.sh`, e.g. `artefacts run curobo_scenarios`.
+# Artefacts ignores exit codes: a run passes unless a tests_junit.xml at the top of
+# $ARTEFACTS_SCENARIO_UPLOAD_DIR says otherwise, so every `run:` below writes one.
+# `metrics:` is read from a fixed path relative to the repo root (outputs/ is gitignored).
+
 jobs:
   unit_tests:
     type: test
@@ -13,15 +18,12 @@ jobs:
     runtime:
       framework: other
       simulator: isaac_sim
-      
+
     scenarios:
       settings:
-        - name: navigator_unit_tests
-          pytest_file: "nodes/navigator/tests"
-          
-        - name: policy_controller_unit_tests
-          pytest_file: "nodes/policy_controller/tests"
-  
+        - name: arena_envs_unit_tests
+          pytest_file: "arena_envs/tests"
+
   eval:
     type: test
     timeout: 20 # minutes
@@ -32,13 +34,13 @@ jobs:
     runtime:
       framework: other
       simulator: isaac_sim
-      
+
     scenarios:
       defaults: # Global to all scenarios, and overriden in specific scenarios.
         output_dirs: ["/tmp/outputs"]
       settings:
         - name: arena_policy_evaluation_test_newton
-          metrics: metrics.json
+          metrics: outputs/eval_metrics.json
           run: |
             PYTHONPATH=. lerobot-eval \
               --policy.path=Artefacts/act-shape-sorting-so101 \
@@ -50,5 +52,43 @@ jobs:
               --eval.batch_size=1 \
               --eval.n_episodes=1 \
               2>&1
-        
+            python envhub/scripts/artefacts_report.py $ARTEFACTS_SCENARIO_UPLOAD_DIR --metrics outputs/eval_metrics.json
 
+  # Edge cases of the scripted CuroboPolicy, one viewport video per scenario, for review
+  # on the dashboard. Minutes of Isaac Sim per scenario: never a routine check.
+  # The scenarios themselves live in arena_envs/src/shape_sorting/scenarios.py.
+  curobo_scenarios:
+    type: test
+    timeout: 60 # minutes; the dashboard's limit. scenarios.py kills a hung run on its own.
+    package:
+      docker:
+        build:
+          dockerfile: empty
+    runtime:
+      framework: other
+      simulator: isaac_sim
+
+    scenarios:
+      defaults:
+        metrics: outputs/scenario_metrics.json
+        run: >-
+          python -m shape_sorting.scenarios "$SCENARIO"
+          --out "$ARTEFACTS_SCENARIO_UPLOAD_DIR"
+          --metrics outputs/scenario_metrics.json 2>&1
+      settings:
+        - name: 01_nominal
+          params: {SCENARIO: 01_nominal}
+        - name: 10_in_hole
+          params: {SCENARIO: 10_in_hole}
+        - name: 11_tipped
+          params: {SCENARIO: 11_tipped}
+        - name: 12_tipped_triangle
+          params: {SCENARIO: 12_tipped_triangle}
+        - name: 13_missed_grasp
+          params: {SCENARIO: 13_missed_grasp}
+        - name: 14_misaligned_insert
+          params: {SCENARIO: 14_misaligned_insert}
+        - name: 15_release_regrip
+          params: {SCENARIO: 15_release_regrip}
+        - name: 16_budgets_exhausted
+          params: {SCENARIO: 16_budgets_exhausted}

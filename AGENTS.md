@@ -66,3 +66,4 @@ For the full external-integration reference, see the Arena docs under `submodule
 - **Never vendor `arena_so101/` back into this repo** — change [isaaclab-so101](https://github.com/art-e-fact/isaaclab-so101) and bump the SHA (see [DEVELOPMENT.md](DEVELOPMENT.md)).
 - **Never commit models, datasets, or secrets.** Keep them on the host and mount them via `./docker/run_docker.sh -d <datasets> -m <models> -e <eval>`.
 - **Ask first** before changing `docker/` or bumping `submodules/IsaacLab-Arena` — these affect every contributor.
+- **Don't run `shape_sorting.scenarios` or the `curobo_scenarios` Artefacts job to check your work.** They boot Isaac Sim for minutes per scenario and exist only to put videos on the Artefacts dashboard. The fast check is `python -m pytest arena_envs/tests`.
