@@ -25,6 +25,7 @@ Contents:
     - [Train an ACT policy on the shape-sorting dataset](#train-an-act-policy-on-the-shape-sorting-dataset)
     - [Evaluate with the LeRobot CLI](#evaluate-with-the-lerobot-cli)
     - [Run the evaluation with Artefacts](#run-the-evaluation-with-artefacts)
+    - [cuRobo edge-case videos on Artefacts](#curobo-edge-case-videos-on-artefacts)
  - [Development](DEVELOPMENT.md)
 
 ## Set up workspace
@@ -519,3 +520,22 @@ Follow these steps to set up your Artefacts project. For more details, refer to 
 artefacts run eval
 ```
 The evaluation videos and metrics will show up on your Artefacts dashboard.
+
+### cuRobo edge-case videos on Artefacts
+
+`curobo_scenarios` records one viewport video per edge case of the scripted cuRobo policy:
+pieces starting in a hole or on their side, missed grasps, misaligned inserts, and exhausted
+retry budgets. The scenarios are defined in
+[`scenarios.py`](arena_envs/src/shape_sorting/scenarios.py). It takes several minutes per
+scenario, so it is meant for reviewing the videos on the dashboard, not for routine checks.
+
+```bash
+source setup.sh
+artefacts run curobo_scenarios
+# one scenario, without Artefacts:
+python -m shape_sorting.scenarios 10_in_hole --out outputs/scenarios/10_in_hole
+```
+
+A scenario fails if it crashes, hangs, writes no video, or leaves a piece unsorted. The one
+exception to the last rule is `16_budgets_exhausted` (`expect="completes"`), which is built
+to leave pieces unsorted.
