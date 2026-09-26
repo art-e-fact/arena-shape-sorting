@@ -18,7 +18,7 @@ from isaaclab.sim.spawners import materials
 from isaaclab.sim.spawners.meshes.meshes_cfg import MeshCfg
 from isaaclab.sim.spawners.spawner_cfg import RigidObjectSpawnerCfg
 from isaaclab.sim.utils import bind_physics_material, bind_visual_material, clone, create_prim, get_current_stage
-from isaaclab.utils import configclass
+from isaaclab.utils.configclass import configclass
 
 from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 

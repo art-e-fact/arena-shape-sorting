@@ -12,7 +12,7 @@ from isaaclab.sensors.contact_sensor.contact_sensor_cfg import ContactSensorCfg
 import torch
 
 from isaaclab_arena.assets.object import Object
-from isaaclab_arena.assets.object_base import ObjectBase, ObjectType
+from isaaclab_arena.assets.object_base import ObjectBase, ObjectType, RootedObjectBase
 from isaaclab_arena.assets.register import register_asset
 from isaaclab_arena.utils.bounding_box import AxisAlignedBoundingBox
 from isaaclab_arena.utils.pose import Pose
@@ -147,7 +147,8 @@ class ShapePiece(Object):
         self, contact_against_object: ObjectBase | None = None, usd_path: str | None = None
     ) -> ContactSensorCfg:
         """Rigid body lives on the spawned root Xform; there is no backing USD file."""
-        return ObjectBase.get_contact_sensor_cfg(self, contact_against_object)
+        # The plain root-prim sensor (Object's version searches a USD file for the rigid body).
+        return RootedObjectBase.get_contact_sensor_cfg(self, contact_against_object)
 
 
 @register_asset
@@ -294,7 +295,8 @@ class SortingBox(Object):
         self, contact_against_object: ObjectBase | None = None, usd_path: str | None = None
     ) -> ContactSensorCfg:
         """Rigid body lives on the spawned root Xform; there is no backing USD file."""
-        return ObjectBase.get_contact_sensor_cfg(self, contact_against_object)
+        # The plain root-prim sensor (Object's version searches a USD file for the rigid body).
+        return RootedObjectBase.get_contact_sensor_cfg(self, contact_against_object)
 
 
 @dataclass

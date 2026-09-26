@@ -10,8 +10,6 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import subtract_frame_transforms
 
-from isaaclab_arena.tasks.predicates.predicate_utils import get_env
-
 
 def objects_centers_inside_aabb(
     env: ManagerBasedRLEnv,
@@ -27,7 +25,7 @@ def objects_centers_inside_aabb(
     (e.g. the sorting-box cavity). Each object pose is transformed into that frame via
     the container's live root pose.
     """
-    unwrapped = get_env(env)
+    unwrapped = env.unwrapped
     container: RigidObject = unwrapped.scene[container_cfg.name]
     container_pos_w = wp.to_torch(container.data.root_pos_w)
     container_quat_w = wp.to_torch(container.data.root_quat_w)

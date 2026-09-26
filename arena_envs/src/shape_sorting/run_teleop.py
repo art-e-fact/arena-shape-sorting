@@ -11,9 +11,9 @@ Examples::
       --viz kit --num_envs 1 \\
       shape_sorting_test \\
       --embodiment so101_abs_joint \\
-      --teleop_device gamepad
+      --teleop_device so101_gamepad
 
-    # SE(3) — keyboard / spacemouse / gamepad
+    # SE(3) — keyboard / spacemouse / so101_gamepad
     python -m shape_sorting.run_teleop \\
       --viz kit --num_envs 1 \\
       shape_sorting_test \\

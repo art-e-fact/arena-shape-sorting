@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from arena_so101 import CUROBO_ROBOT_YML
+from arena_so101.curobo import robot_cfg
 from arena_so101.mapping import SIM_JOINT_NAMES
 from shape_sorting.curobo_viz import CollisionDebugViz, NullCollisionDebugViz
 from shape_sorting.curobo_world import (
@@ -30,19 +32,6 @@ if TYPE_CHECKING:
     import gymnasium as gym
     from curobo.motion_planner import MotionPlanner
     from curobo.types import JointState, Pose
-
-try:
-    import arena_so101 as _arena_so101
-
-    _DEFAULT_ROBOT_YML = (
-        Path(_arena_so101.__file__).resolve().parent
-        / "embodiments"
-        / "data"
-        / "curobo"
-        / "so101.yml"
-    )
-except Exception:
-    _DEFAULT_ROBOT_YML = Path()
 
 _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
 
@@ -101,16 +90,9 @@ def _format_plan_failure(result) -> str:
 
 
 def resolve_robot_yml(robot_yml: str = "") -> Path:
-    path = (
-        Path(robot_yml).expanduser().resolve()
-        if robot_yml
-        else Path(_DEFAULT_ROBOT_YML).resolve()
-    )
+    path = Path(robot_yml).expanduser().resolve() if robot_yml else Path(CUROBO_ROBOT_YML)
     if not path.is_file():
-        raise FileNotFoundError(
-            f"cuRobo robot YAML not found: {path}. "
-            "Generate it with: python -m arena_so101.generate_curobo_config --skip-usd-convert"
-        )
+        raise FileNotFoundError(f"cuRobo robot YAML not found: {path} (arena-so101 ships the default one).")
     return path
 
 
@@ -150,9 +132,11 @@ class MotionClient:
 
         yml = resolve_robot_yml(self.cfg.robot_yml)
         print(f"[MotionClient] Loading robot config: {yml}")
+        # robot_cfg() resolves the YAML's relative urdf_path; a bare path would make
+        # cuRobo look for the URDF under its own assets.
         with torch.inference_mode(False):
             cfg = MotionPlannerCfg.create(
-                robot=str(yml),
+                robot=robot_cfg(yml),
                 scene_model=None,
                 collision_cache=dict(DEFAULT_COLLISION_CACHE),
                 self_collision_check=self.cfg.self_collision_check,
