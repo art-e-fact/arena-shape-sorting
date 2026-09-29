@@ -82,8 +82,7 @@ The viewer should show the environment with the default embodiment.
 ### cuRobo SO-101 reach smoke test
 
 Plans once to a fixed EE pose with cuRobo, then plays absolute joint waypoints
-(``so101_abs_joint``). Requires a generated ``so101.yml``
-(``python -m arena_so101.generate_curobo_config``).
+(``so101_abs_joint``). The cuRobo robot config ships with ``arena-so101``.
 
 ```bash
 python submodules/IsaacLab-Arena/isaaclab_arena/evaluation/policy_runner.py \
@@ -111,7 +110,7 @@ These flags go after the `shape_sorting_test` subcommand (same for `policy_runne
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--embodiment` | `droid_rel_joint_pos` | Robot embodiment registry name (`so101_ik`, `so101_abs_joint`, …) |
-| `--teleop_device` | none | Teleop device (`keyboard`, `gamepad`, `spacemouse`, `so101_leader`, …) |
+| `--teleop_device` | none | Teleop device (`keyboard`, `so101_gamepad`, `spacemouse`, `so101_leader`, …) |
 | `--leader_port` | `/dev/ttyACM0` | Serial port for `so101_leader` |
 | `--leader_id` | `leader` | Leader arm id |
 | `--leader_recalibrate` | off | Recalibrate the leader arm on start |
@@ -190,13 +189,13 @@ inside the hole at release.
 |------|---------|-------------|
 | `--place_z_offset_m` | `0.02` | Piece-origin height above the hole at release [m]. The piece drops the last few mm and the rim chamfer aligns it. |
 | `--place_hover_z_offset_m` | `0.045` | Piece-origin height at the end of the transport [m]. The gap to the line above is the descent, and the retreat replays it backwards — so this is the climb-out height. |
-| `--grasp_height_m` | `0.10` | Tool height above the piece's origin for the grasp [m]. Sets where on the piece the jaws close (default: fingertips 5 mm below its centre). Measured from the piece's live pose, and raised as needed to keep the fingertips off the lid. Replaces the absolute `--grasp_z_m 0.145`. |
+| `--grasp_height_m` | `-0.002` | TCP height (between the jaw tips) above the piece's origin for the grasp [m]. Sets where on the piece the jaws close (default: fingertips 5 mm below its centre). Measured from the piece's live pose, and raised as needed to keep the fingertips off the lid. Replaces the absolute `--grasp_z_m 0.145`. |
 
 Two things were tried here and measured *worse* or neutral, so they are not the defaults —
 `training_research.local/insert-strategy.md` has the numbers. Seating the piece into the
 lid before releasing (`--place_z_offset_m 0.011`) quadrupled failed insertions, because the
 jaws are rigid and jam a slightly misaligned piece where dropping lets gravity correct it.
-Gripping higher (`--grasp_height_m 0.106`) made no measurable difference.
+Gripping higher (`--grasp_height_m 0.004`) made no measurable difference.
 
 > When comparing two configs, pass `--placement_seed N`. `--seed` does **not** control
 > object placement, so without it the two runs see different scenes.
@@ -355,13 +354,13 @@ https://github.com/user-attachments/assets/6e2105bf-f46c-4b04-8061-7cf49cbc7e35
 
 ### Other tested teleop options for the SO-101 embodiment
 
-*See the [SO-101 embodiment](https://github.com/art-e-fact/isaaclab-so101#joint-space-gamepad-layout-so101_abs_joint--gamepad) for more detail.*
+*See the [SO-101 embodiment](https://github.com/art-e-fact/isaaclab-so101#joint-space-gamepad-layout-so101_abs_joint--so101_gamepad) for more detail.*
 
 SE(3) differential gamepad:
 ```bash
   ...
   --embodiment so101_ik \
-  --teleop_device gamepad
+  --teleop_device so101_gamepad
 ```
 
 Joint-space gamepad (absolute joints — recommended for SO-101):
@@ -369,7 +368,7 @@ Joint-space gamepad (absolute joints — recommended for SO-101):
 ```bash
   ...
   --embodiment so101_abs_joint \
-  --teleop_device gamepad
+  --teleop_device so101_gamepad
 ```
 
 Teleop with the SO-101 leader arm:

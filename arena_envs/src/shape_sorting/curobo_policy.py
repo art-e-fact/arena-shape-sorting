@@ -113,6 +113,7 @@ import gymnasium as gym
 import torch
 from gymnasium.spaces.dict import Dict as GymSpacesDict
 
+from arena_so101 import JAW_CLOSE_RAD, JAW_OPEN_RAD
 from arena_so101.mapping import SIM_JOINT_NAMES
 from isaaclab_arena.assets.register import register_policy
 from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
@@ -128,14 +129,14 @@ if TYPE_CHECKING:
     Candidate = tuple[str, EePose, EePose]
     """``(label, hover pose, contact pose)``."""
 
-# Grasp pose relative to goal_object (robot base frame).
-_GOAL_XY_STANDOFF_M = 0.03
+# Grasp pose relative to goal_object (robot base frame). Tuned with the ``gripper`` link
+# origin as the cuRobo tool frame; the tool frame is now ``tcp`` between the jaw tips, 7 mm
+# behind and 102 mm below it (arena_so101.TCP_OFFSET), so the standoff carries those 7 mm
+# and ``grasp_height_m`` the 102 mm: the physical grasp is unchanged.
+_GOAL_XY_STANDOFF_M = 0.037
 _GOAL_TILT_RAD = 0.0
 _GOAL_ROLL_RAD = 0.0
 
-# Workshop USD Jaw limits (degrees → radians), same as arena_so101.
-_JAW_OPEN_RAD = math.radians(100.0)
-_JAW_CLOSE_RAD = math.radians(-10.0)
 _JAW_INDEX = SIM_JOINT_NAMES.index("Jaw")
 
 # Object-origin height above its resting height when parked on the table. Just enough
@@ -182,9 +183,10 @@ _PAN_AXIS_XY = (0.0207909, -0.0230745)
 _PIECE_HALF_HEIGHT_M = 0.015
 _PIECE_MAX_RADIUS_M = 0.022
 
-# The fingertip collision spheres' lowest point below the cuRobo tool frame, and the gap
-# kept between them and the lid when grasping a piece that sits on it or in a hole.
-_FINGERTIP_BELOW_TOOL_M = 0.105
+# The fingertip collision spheres' lowest point below the cuRobo tool frame (``tcp``, between
+# the jaw tips), and the gap kept between them and the lid when grasping a piece that sits
+# on it or in a hole.
+_FINGERTIP_BELOW_TOOL_M = 0.003
 _LID_FINGERTIP_CLEARANCE_M = 0.003
 
 # Where a piece is set down to be picked up level: clear of the box wall (SortingBox's
@@ -569,14 +571,15 @@ class CuroboPolicyCfg(PolicyCfg):
     place_object: str = "sorting_box"
     """Unused; place XY/Z come from ``hole_frames`` matching the current shape."""
 
-    grasp_height_m: float = 0.10
+    grasp_height_m: float = -0.002
     """Tool-frame height above the piece's origin for the grasp pose [m].
 
-    Calibration knob: the cuRobo tool frame is the ``gripper`` *link* origin, ~0.105 m
-    above where the jaws actually close (the fingertip collision sphere sits 0.105 below
-    it), so this decides *where on the piece* the jaws grip. The default puts the
-    fingertips 5 mm below the piece's centre — for a piece standing on the table, ~1 cm
-    above the table; 1 cm lower and there is no collision-free solution at all.
+    Calibration knob: the cuRobo tool frame is the ``tcp`` link between the jaw tips (the
+    fingertip collision spheres reach 3 mm below it), so this decides *where on the piece*
+    the jaws grip. The default puts the fingertips 5 mm below the piece's centre — for a
+    piece standing on the table, ~1 cm above the table; 1 cm lower and there is no
+    collision-free solution at all. (Numbers here were tuned with the ``gripper`` link
+    origin as the tool frame, 0.102 m higher: 0.10 then is -0.002 now.)
 
     Measured from the piece's live pose, so it holds wherever the piece lies. On the lid
     or wedged in a hole, the grasp is raised as far as it takes for the fingertips to
@@ -584,7 +587,7 @@ class CuroboPolicyCfg(PolicyCfg):
     table, but one that needed the piece's resting height on record.)
 
     Gripping higher is tempting — it keeps the jaws further above the lid while the piece
-    is seated — but it measured worse: 0/9 failed insertions here against 3/13 at 0.106
+    is seated — but it measured worse: 0/9 failed insertions here against 3/13 at 0.004
     over 3 rollouts each (unpaired, so weak — pass ``--placement_seed`` to compare
     properly), with no clearance problem to fix at either height. The likely mechanism
     is that the piece hangs lower below the grip and tilts further when its bottom
@@ -628,10 +631,10 @@ class CuroboPolicyCfg(PolicyCfg):
     orientation_tolerance: float = 0.1
     """Orientation tolerance [rad]."""
 
-    jaw_open: float = _JAW_OPEN_RAD
+    jaw_open: float = JAW_OPEN_RAD
     """Jaw command while approaching a piece and when releasing it [rad]."""
 
-    jaw_closed: float = _JAW_CLOSE_RAD
+    jaw_closed: float = JAW_CLOSE_RAD
     """Jaw command while grasping and carrying [rad]. Below the fully-closed position on
     purpose, so the jaw keeps squeezing whatever it holds."""
 
@@ -1870,7 +1873,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
 
         # The tool's yaw follows the tool's own XY, which depends on where the offset puts
         # it: iterate. Once was enough for an upright tool (a few mm of slack), not for a
-        # tilted one, whose ~0.1 m offset swings out sideways.
+        # tilted one, whose offset swings out sideways.
         offset = motion.grasp_offset_ee.to(device=device, dtype=torch.float32).unsqueeze(0)
         pivot = _PAN_AXIS_XY if tilt else (0.0, 0.0)  # see so101_ee_pose_xyzw
         ee_pos = obj_desired

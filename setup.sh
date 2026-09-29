@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host (non-Docker) environment for arena-shape-sorting.
+# Environment for arena-shape-sorting.
 #
 # Syncs IsaacLab-Arena's uv venv (Isaac Lab + Arena), installs cuRobo and our
 # packages editable into it, then activates that venv in the current shell.
@@ -8,19 +8,17 @@
 #   source ./setup.sh
 #   # or: . ./setup.sh
 #
-# After that, use the same commands as in Docker, e.g.:
+# After that, e.g.:
 #   python -m shape_sorting.run_record_demos_segmented ...
 #
-# Options (pass after sourcing, e.g. `source ./setup.sh --wheel`):
-#   --wheel   Use Arena's isaaclab-from-wheel group instead of from-source
-#   --force   Re-run uv sync and regenerate the cuRobo SO-101 config
+# Options (pass after sourcing, e.g. `source ./setup.sh --force`):
+#   --force   Re-run uv sync (after a submodule or pin bump)
 #   -h/--help Show this help
 #
 # Optional env: ARENA_SO101_PATH — local isaaclab-so101 checkout (see DEVELOPMENT.md).
 
 _setup_main() {
-  local REPO_ROOT ARENA_DIR CUROBO_DIR VENV_DIR CUDA_EXTRA CUROBO_YML FORCE=false WHEEL=false
-  local UV_SYNC_ARGS=()
+  local REPO_ROOT ARENA_DIR CUROBO_DIR VENV_DIR CUDA_EXTRA FORCE=false
 
   # Resolve repo root whether sourced or executed.
   if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
@@ -34,7 +32,6 @@ _setup_main() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --wheel) WHEEL=true ;;
       --force) FORCE=true ;;
       -h|--help)
         sed -n '2,20p' "${BASH_SOURCE[0]:-$0}" | sed 's/^# \?//'
@@ -65,14 +62,11 @@ _setup_main() {
     return 1
   fi
 
-  if [[ "${WHEEL}" == true ]]; then
-    UV_SYNC_ARGS=(--no-default-groups --group isaaclab-from-wheel)
-  fi
-
-  # Sync on first use, when --force, or when switching to the wheel flavor.
-  if [[ "${FORCE}" == true || "${WHEEL}" == true || ! -x "${VENV_DIR}/bin/python" ]]; then
+  # Sync on first use or when --force. uv sync removes what Arena's lock doesn't list, so
+  # cuRobo and our packages go back in below after every sync.
+  if [[ "${FORCE}" == true || ! -x "${VENV_DIR}/bin/python" ]]; then
     echo "setup.sh: syncing Arena environment in ${ARENA_DIR} ..."
-    (cd "${ARENA_DIR}" && uv sync "${UV_SYNC_ARGS[@]}") || return 1
+    (cd "${ARENA_DIR}" && uv sync) || return 1
   else
     echo "setup.sh: Arena venv already present (pass --force to re-sync)"
   fi
@@ -101,24 +95,11 @@ _setup_main() {
     fi
     echo "setup.sh: reinstalling arena-so101 editable from ${ARENA_SO101_PATH} ..."
     uv pip install --python "${VENV_DIR}/bin/python" \
-      -e "${ARENA_SO101_PATH}[leader]" || return 1
+      -e "${ARENA_SO101_PATH}[leader,lerobot]" || return 1
   fi
 
   export OMNI_KIT_ACCEPT_EULA=YES
   export ACCEPT_EULA=Y
-
-  # so101.yml is generated, not shipped: it lands inside the installed arena_so101
-  # package, so deleting the venv deletes it too. CuroboPolicy only loads it once a
-  # rollout is already running, so a missing file surfaces as a crash minutes in —
-  # generate it here instead. Needs headless Isaac Sim (USD→URDF) + CUDA (sphere fit).
-  CUROBO_YML="$("${VENV_DIR}/bin/python" -c \
-    'from shape_sorting.curobo_motion import _DEFAULT_ROBOT_YML as p; print(p)')" || return 1
-  if [[ "${FORCE}" == true || ! -f "${CUROBO_YML}" ]]; then
-    echo "setup.sh: generating cuRobo SO-101 config (a few minutes) -> ${CUROBO_YML}"
-    "${VENV_DIR}/bin/python" -m arena_so101.generate_curobo_config --headless || return 1
-  else
-    echo "setup.sh: cuRobo SO-101 config present (pass --force to regenerate)"
-  fi
 
   # shellcheck disable=SC1091
   source "${VENV_DIR}/bin/activate" || return 1
@@ -134,7 +115,6 @@ _setup_main() {
   cd "${REPO_ROOT}" || return 1
 
   echo "setup.sh: ready — python=$(command -v python)"
-  echo "  Same demo commands as Docker work from here (python -m shape_sorting...)."
 }
 
 # Refuse bare execution: activation must apply to the caller's shell.

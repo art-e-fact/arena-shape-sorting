@@ -77,7 +77,6 @@ from isaaclab_arena_environments.cli import (
 if TYPE_CHECKING:
     import gymnasium as gym
     from arena_so101.lerobot.recorder import SO101LeRobotRecorder
-    from isaaclab.managers import TerminationTermCfg
     from isaaclab_arena.policy.policy_base import PolicyBase
 
 # Soft stop for SIGINT/SIGTERM: finish the current step/save, then finalize.
@@ -213,11 +212,14 @@ def _add_generation_arguments(parser) -> None:
     )
 
 
-def _configure_env_for_recording(env_cfg: Any) -> Any:
-    """Disable success termination and return the term for manual polling."""
+def _configure_env_for_recording(env_cfg: Any) -> Callable[[gym.Env], Any]:
+    """Disable success termination and return the success predicate for manual polling."""
     if hasattr(env_cfg.terminations, "success"):
-        success_term = env_cfg.terminations.success
+        # Arena's success term is a stateful manager term: poll the predicate instead.
+        from shape_sorting.sorting_task import pieces_in_box
+
         env_cfg.terminations.success = None
+        success_term = pieces_in_box
     else:
         raise NotImplementedError(
             "No success termination term was found in the environment. "
@@ -229,24 +231,6 @@ def _configure_env_for_recording(env_cfg: Any) -> Any:
     env_cfg.recorders = None
 
     return success_term
-
-
-def _get_processed_actions(base_env: gym.Env):
-    """Return the action targets applied during the latest step, as a CPU numpy copy.
-
-    The copy is not optional: frames wait in ``ClipRecorder``'s buffer for many steps
-    before they are written, and the action manager reuses its target buffers every
-    step, so a view would turn every buffered frame into the newest action.
-    """
-    import torch
-
-    processed_actions = [
-        base_env.action_manager.get_term(term_name).processed_actions
-        for term_name in base_env.action_manager.active_terms
-    ]
-    assert processed_actions, "The environment has no active action terms"
-    actions = torch.cat(processed_actions, dim=-1)
-    return actions.detach().to("cpu", copy=True).numpy()
 
 
 def _apply_action_noise(actions, action_noise: float):
@@ -278,8 +262,8 @@ def _reset_recording_episode(
     return obs
 
 
-def _is_success(base_env: gym.Env, success_term: TerminationTermCfg) -> bool:
-    return bool(success_term.func(base_env, **success_term.params)[0])
+def _is_success(base_env: gym.Env, success_term: Callable[[gym.Env], Any]) -> bool:
+    return bool(success_term(base_env)[0])
 
 
 def _is_demonstration_ended(policy: PolicyBase) -> bool:
@@ -306,7 +290,7 @@ def collect_policy_demos(
     env: gym.Env,
     policy: PolicyBase,
     recorder: SO101LeRobotRecorder,
-    success_term: TerminationTermCfg,
+    success_term: Callable[[gym.Env], Any],
     *,
     generation_num_trials: int,
     max_retries: int | None,
@@ -333,6 +317,8 @@ def collect_policy_demos(
     Returns:
         (num_successful, num_failed)
     """
+    from arena_so101.lerobot import joint_targets
+
     import torch
     from shape_sorting.demo_clips import ClipRecorder
 
@@ -382,11 +368,9 @@ def collect_policy_demos(
                 {"checkpoint": clips.checkpoint, "cut": clips.cut}[event]()
             recording_observation = recorder.snapshot_observation(obs)
             obs, _, terminated, truncated, _ = env.step(actions)
-            clips.add(
-                recording_observation,
-                _get_processed_actions(base_env),
-                task_description,
-            )
+            # The joint targets the sim received for this step (a CPU copy: frames wait in
+            # the clip buffer while the articulation reuses its target buffer).
+            clips.add(recording_observation, joint_targets(base_env), task_description)
 
             if _is_success(base_env, success_term):
                 success_step_count += 1

@@ -7,48 +7,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from isaaclab_arena.environments.arena_environment_factory import ArenaEnvironmentCfg, ArenaEnvironmentFactory
 
 from shape_sorting.shape_forms import DEFAULT_EDGE_CHAMFER, DEFAULT_FORMS, DEFAULT_HOLE_CHAMFER, ShapeForm
 
 if TYPE_CHECKING:
-    from isaaclab.sensors import CameraCfg
-
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
-
-
-def _camera_offset_look_at(
-    eye: tuple[float, float, float],
-    target: tuple[float, float, float],
-    *,
-    convention: Literal["opengl", "ros", "world"] = "ros",
-) -> CameraCfg.OffsetCfg:
-    """Build a ``CameraCfg.OffsetCfg`` that places the camera at ``eye`` looking at ``target``.
-
-    Both points are in the camera parent frame (for ``{ENV_REGEX_NS}/external_camera``
-    that is the env / world frame). ``CameraCfg`` has no prim look-at; only ``pos`` + ``rot``.
-    """
-    import torch
-    from isaaclab.sensors import CameraCfg
-    from isaaclab.utils.math import (
-        convert_camera_frame_orientation_convention,
-        create_rotation_matrix_from_view,
-        quat_from_matrix,
-    )
-
-    eyes = torch.tensor([eye], dtype=torch.float32)
-    targets = torch.tensor([target], dtype=torch.float32)
-    # world → view (OpenGL: forward -Z). Convert into the requested camera convention.
-    rot_m = create_rotation_matrix_from_view(eyes, targets, up_axis="Z")
-    quat_opengl = quat_from_matrix(rot_m)[0]
-    quat = convert_camera_frame_orientation_convention(quat_opengl.unsqueeze(0), origin="opengl", target=convention)[0]
-    return CameraCfg.OffsetCfg(
-        pos=eye,
-        rot=tuple(float(x) for x in quat.tolist()),
-        convention=convention,
-    )
 
 
 PHYSICS_HZ = 200.0
@@ -278,7 +244,6 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
 
     def build(self, cfg: ShapeSortingEnvironmentCfg) -> IsaacLabArenaEnvironment:
         """Build the environment from its typed configuration."""
-        import isaaclab.envs.mdp as mdp_isaac_lab
         from isaaclab.envs.common import ViewerCfg
         from isaaclab.managers import EventTermCfg, SceneEntityCfg, TerminationTermCfg
 
@@ -287,19 +252,14 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.relations.relations import IsAnchor, On, PositionLimits
         from isaaclab_arena.scene.scene import Scene
-        from isaaclab_arena.tasks.sorting_task import SortMultiObjectTask
         from isaaclab_arena.utils.pose import Pose
 
         from shape_sorting.debug_key_reset import debug_key_reset_termination
-        from shape_sorting.predicates import objects_centers_inside_aabb
         from shape_sorting.shape_asset import SortingBox, make_shape_sorting_layout
+        from shape_sorting.sorting_task import ShapeSortingTask
 
-        # SO-101 embodiments / devices (and Arena gamepad) live in arena_so101.
-        if (
-            cfg.embodiment.startswith("so101")
-            or (cfg.teleop_device or "").startswith("so101")
-            or cfg.teleop_device == "gamepad"
-        ):
+        # SO-101 embodiments and devices (so101_*, including so101_gamepad) live in arena_so101.
+        if cfg.embodiment.startswith("so101") or (cfg.teleop_device or "").startswith("so101"):
             import arena_so101
 
             if not hasattr(arena_so101, "register"):
@@ -355,28 +315,24 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         directional_light = self.asset_registry.get_asset_by_name("directional_light")()
 
         # Select the embodiment (flat obs vector for RL policy input).
-        embodiment = self.asset_registry.get_asset_by_name(cfg.embodiment)(
-            enable_cameras=cfg.enable_cameras,
-            concatenate_observation_terms=True,
-        )
-
-        # Set the initial pose for the SO-101 to sit on the side of the table.
+        embodiment_kwargs = dict(enable_cameras=cfg.enable_cameras, concatenate_observation_terms=True)
         if "so101" in cfg.embodiment:
-            embodiment.set_initial_pose(
-                Pose(
-                    position_xyz=(0.236, 0.0, -0.027),
-                    rotation_xyzw=embodiment.scene_config.robot.init_state.rot,
-                )
-            )
-            # Over-shoulder / elevated third-person cam looking at the sorting table.
-            # CameraCfg has no look-at-prim API — set eye + target in env frame and
-            # derive the offset quaternion (see ``_camera_offset_look_at``).
+            # Sit on the side of the table, facing +X (arena_so101 composes the base yaw).
+            embodiment_kwargs["initial_pose"] = Pose(position_xyz=(0.236, 0.0, -0.027))
+        embodiment = self.asset_registry.get_asset_by_name(cfg.embodiment)(**embodiment_kwargs)
+
+        if "so101" in cfg.embodiment:
+            # Over-shoulder third-person view of the sorting table: eye and target relative to
+            # the robot base (env frame (1.2, -0.55, 0.9) -> (0.45, 0.0, 0.05)). The camera is
+            # attached to the base link, so it moves with the robot.
             if cfg.enable_cameras and embodiment.camera_config is not None:
-                embodiment.camera_config.external_camera.offset = _camera_offset_look_at(
-                    eye=(1.2, -0.55, 0.9),
-                    target=(0.45, 0.0, 0.05),
-                    convention="ros",
-                )
+                embodiment.set_external_camera_view((0.964, -0.55, 0.927), (0.214, 0.0, 0.077))
+            # Back to the initial joint pose (± noise) on every reset: arena_so101 owns the
+            # event, this only sets the noise. Not collision-checked; keep it small.
+            embodiment.event_config.reset_robot_joints.params["position_range"] = (
+                -cfg.reset_robot_joint_noise,
+                cfg.reset_robot_joint_noise,
+            )
 
         # Droid does not wire concatenate_observation_terms into its obs cfg yet.
         embodiment.observation_config.policy.concatenate_terms = True
@@ -402,19 +358,13 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
         )
 
         # Place-all task: success when every piece center is inside the box cavity.
-        task = SortMultiObjectTask(
+        cavity = layout.box.get_inner_bounding_box()
+        task = ShapeSortingTask(
             pick_up_object_list=layout.pieces,
             destination_location_list=[layout.box] * len(layout.pieces),
             background_scene=background,
             episode_length_s=cfg.episode_length_s,
-        )
-        # SortMultiObjectTask takes no description. Must match the recorded datasets'
-        # task text: language-conditioned policies (SmolVLA) tokenize it every step.
-        task.task_description = "Insert the shapes into the sorting box."
-        cavity = layout.box.get_inner_bounding_box()
-        task.termination_cfg.success = TerminationTermCfg(
-            func=objects_centers_inside_aabb,
-            params={
+            piece_in_box_params={
                 "object_cfg_list": [SceneEntityCfg(piece.name) for piece in layout.pieces],
                 "container_cfg": SceneEntityCfg(layout.box.name),
                 "aabb_min": tuple(cavity.min_point[0].tolist()),
@@ -422,6 +372,9 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
                 "velocity_threshold": 0.1,
             },
         )
+        # SortMultiObjectTask takes no description. Must match the recorded datasets'
+        # task text: language-conditioned policies (SmolVLA) tokenize it every step.
+        task.task_description = "Insert the shapes into the sorting box."
 
         # Privileged lid-hole frames (box-local offsets) for policies / debug viz.
         from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg
@@ -445,25 +398,10 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
             _apply_control_rate(env_cfg, cfg.control_hz)
             env_cfg.viewer = ViewerCfg(eye=(1.5, 0.0, 1.0), lookat=(0.2, 0.0, 0.0))
             env_cfg.shapes = [ShapeInfo(prim_path=piece.prim_path) for piece in layout.pieces]
-            # Same params as the success termination, so a policy can verify one piece with
-            # the exact success criterion by overriding ``object_cfg_list``. Recording scripts
-            # null ``terminations.success`` (the attribute), which leaves this dict intact.
-            env_cfg.piece_in_box_params = task.termination_cfg.success.params
-            # Send the arm back to its default pose (± noise) on every reset. Nothing else
-            # does: Arena's reset events only re-place the box and pieces, so the arm would
-            # start the next episode where it dropped the last piece — often intersecting
-            # the re-placed box, which the policy then has to fight its way out of.
-            # ponytail: the sampled offsets are not collision-checked. Keep the noise small;
-            # for wide start-state coverage, reject samples with the cuRobo world checker.
-            env_cfg.events.reset_robot_joints = EventTermCfg(
-                func=mdp_isaac_lab.reset_joints_by_offset,
-                mode="reset",
-                params={
-                    "asset_cfg": SceneEntityCfg("robot"),
-                    "position_range": (-cfg.reset_robot_joint_noise, cfg.reset_robot_joint_noise),
-                    "velocity_range": (0.0, 0.0),
-                },
-            )
+            # Same params as the success predicate, so a policy can verify one piece with the
+            # exact success criterion by overriding ``object_cfg_list``, and recording scripts
+            # can poll ``pieces_in_box`` after nulling ``terminations.success``.
+            env_cfg.piece_in_box_params = task.piece_in_box_params
             # Both added here, after the placement event composed into env_cfg.events, and
             # events run in the order they were added: box and pieces have their episode
             # poses. Half-height and plan radius per piece, from its own bounding box.

@@ -76,14 +76,16 @@ import isaaclab_mimic.envs  # noqa: F401
 import isaaclab_tasks  # noqa: F401
 import isaaclab_tasks.manager_based.manipulation.pick_place  # noqa: F401
 from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg, Se3SpaceMouse, Se3SpaceMouseCfg
-from isaaclab.devices.teleop_device_factory import create_teleop_device
 from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
 from isaaclab.managers import DatasetExportMode
 from isaaclab.utils.datasets import EpisodeData
 from isaaclab_teleop import IsaacTeleopCfg, create_isaac_teleop_device, remove_camera_configs
+from isaaclab_teleop.deprecated.teleop_device_factory import create_teleop_device
 
-from isaaclab_arena.utils.isaaclab_utils.recorders import ArenaEnvRecorderManagerCfg
+from isaaclab_arena.terms.recorders import ArenaEnvRecorderManagerCfg
 from isaaclab_arena.utils.isaaclab_utils.simulation_app import reapply_viewer_cfg
+
+from shape_sorting.sorting_task import pieces_in_box
 
 HELP = "[PLANNING] I=retry U=undo P=replay O=smooth Backspace=abort R=reset"
 
@@ -291,7 +293,7 @@ def try_export_after_execute(env, session: Session, success_term) -> bool:
 
     hold = session.plan_actions[-1].to(env.device) if session.plan_actions else None
     for i in range(args_cli.num_success_steps):
-        if not bool(success_term.func(env, **success_term.params)[0]):
+        if not bool(success_term(env)[0]):
             return False
         # Record still frames between checks so success is consecutive in the demo.
         if i + 1 < args_cli.num_success_steps and hold is not None:
@@ -316,10 +318,11 @@ def setup_env():
     arena_builder = get_arena_builder_from_cli(args_cli)
     env_name, env_cfg, env_kwargs = arena_builder.build_registered()
 
+    # Arena's success term is a stateful manager term: null it and poll the predicate.
     success_term = None
     if hasattr(env_cfg.terminations, "success"):
-        success_term = env_cfg.terminations.success
         env_cfg.terminations.success = None
+        success_term = pieces_in_box
     else:
         omni.log.warn("No success termination — demos cannot be auto-marked successful.")
 
