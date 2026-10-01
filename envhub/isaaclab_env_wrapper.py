@@ -181,9 +181,11 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
         # envs is already the *next* episode's — drop this step's reading for them.
         stage = torch.where(done_t.unsqueeze(-1), torch.zeros_like(stage), stage)
         self._stages = torch.maximum(self._stages, stage)
-        # That reset would otherwise lose the very step an insertion completes. Success is defined
-        # as every piece inside the box, so credit the final stage outright rather than infer it.
-        self._stages[torch.as_tensor(terminated, device=device)] = MAX_STAGE
+        # That reset would otherwise lose the very step an insertion completes, so credit the final
+        # stage outright on success. Not on `terminated`: Arena routes failures like object_dropped
+        # through it too, which would score a piece knocked off the table as a full box.
+        succeeded = self._success_flags(terminated | truncated)
+        self._stages[torch.as_tensor(succeeded, device=device)] = MAX_STAGE
 
         progress = self._stages.float().mean(dim=1) / MAX_STAGE
         names = self._stage_params["object_names"]
