@@ -88,6 +88,15 @@ _setup_main() {
   uv pip install --python "${VENV_DIR}/bin/python" \
     -e "${REPO_ROOT}/arena_envs" || return 1
 
+  # lerobot[smolvla] requires num2words, but Arena's lock does not list it and
+  # `uv sync` removes it — so a --force re-sync silently breaks `lerobot-eval` on a
+  # SmolVLA policy. transformers' SmolVLM processor raises ImportError at policy
+  # load, and Isaac Sim's shutdown swallows it into **exit code 0**, so the run
+  # looks like it passed. Pinned to lerobot's own range.
+  echo "setup.sh: installing num2words (SmolVLM processor; dropped by uv sync) ..."
+  uv pip install --python "${VENV_DIR}/bin/python" \
+    "num2words>=0.5.14,<0.6.0" || return 1
+
   if [[ -n "${ARENA_SO101_PATH:-}" ]]; then
     if [[ ! -d "${ARENA_SO101_PATH}" ]]; then
       echo "setup.sh: ARENA_SO101_PATH is not a directory: ${ARENA_SO101_PATH}" >&2
