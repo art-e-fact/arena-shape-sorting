@@ -17,7 +17,10 @@ one only on purpose, and update this block when you do.
    in mid-fall. No flag carries "what to do next" from one phase into another, and no
    pose is remembered: the only memory is per-piece retry counters, plus two per-attempt
    facts the *recording* needs (was this attempt already cut, how tipped was the piece
-   before it was grasped).
+   before it was grasped). One exception, on purpose: a piece let go misaligned on purpose
+   (``place_release_misaligned_prob``) is left where it lands and the arm climbs out,
+   while an accidental failed drop is closed on again — and once the jaw is open, the
+   world no longer shows which of the two it was.
 3. **Plan whole approaches, and only from clear poses.** A candidate counts only if both
    its hover move and its descent plan. After contact the arm leaves by replaying the
    descent — it never asks cuRobo to start from a pose that touches something, which
@@ -54,6 +57,11 @@ Where a mistake is caught, and what follows:
 * the released piece never turns up in the cavity → "cut", JAW closes on it again — it is
   still between the jaws, so that needs no plan — then as above (another "cut" if that
   close finds nothing);
+* with ``--place_release_misaligned_prob``, a piece caught off its hole is let go anyway,
+  as a trained policy playing its chunk open-loop would → "cut" after the settle wait (or
+  once it turns up in the box: letting go there was still the mistake), UP with the jaw
+  open, grasp it where it lies. Only while a regrasp and another insert are in budget, so
+  a let-go piece is never deferred where it lies;
 * a grasp that let the piece slip, or tipped an upright piece in the jaws → "cut" in
   ``_decide``; giving up on a piece that used any tries, or dropping one in mid-air
   because nothing plans → "cut" too.
@@ -644,6 +652,16 @@ class CuroboPolicyCfg(PolicyCfg):
     jaw_empty_tol: float = math.radians(5.0)
     """A measured jaw within this of ``jaw_closed`` means it closed on nothing [rad]."""
 
+    nearest_first: bool = False
+    """Work the pieces nearest the box first, instead of in ``env.cfg.shapes`` order.
+
+    A fixed order shows each piece in one context only — the last one is only ever picked
+    with the others already in — so a trained policy that leaves a piece behind faces a
+    scene no demonstration had. Distance to the box is visible to the cameras, so the next
+    piece stays a single answer (a random order would make it a coin flip at every pick);
+    and the layout is random, so every piece still comes first, middle and last. Pieces
+    that start on the box or knocked over go first regardless."""
+
     max_grasp_retries: int = 5
     """Grasp attempts per piece before it goes to the back of the queue.
 
@@ -669,7 +687,8 @@ class CuroboPolicyCfg(PolicyCfg):
 
     The check runs once as soon as ``open_steps`` elapses, so a clean insert costs no
     extra frames. A piece that has not turned up by the end (~0.5 s at 30 Hz) is closed
-    on again and recovered."""
+    on again and recovered — or, if it was let go misaligned on purpose, left where it
+    lies and grasped again from above."""
 
     miss_notice_delay_max_steps: int = 0
     """Max steps to keep carrying an empty gripper before noticing a missed grasp.
@@ -735,6 +754,21 @@ class CuroboPolicyCfg(PolicyCfg):
     cube arriving 45° off its hole is the case its recovery most needs to have seen — so
     the default spans the cube's whole folded range. Sampling uniformly rather than at
     the bound keeps a mix of near misses (which still drop in) and clear ones."""
+
+    place_release_misaligned_prob: float = 0.0
+    """Probability that a placement caught misaligned is let go anyway, then recovered from above.
+
+    A trained policy plays its action chunk open-loop: it opens the jaw wherever the descent
+    ends and climbs out, as every clean insert taught it. What it then has to recover from is
+    an open jaw above a piece lying on the lid or wedged in its hole — not a misaligned piece
+    still in the jaws, which is all lifting it back out records. With this, the piece is let
+    go, the arm climbs out with the jaw open and ``_decide`` grasps it where it settled. The
+    release itself is cut, so only the climb-out and the recovery are recorded. Pair it with
+    :attr:`place_perturb_prob`, which makes the misaligned placements. 0 disables it.
+
+    Only while the piece has a regrasp and another insert left in its budget; past that it
+    is lifted back out and parked as before. Otherwise ``_decide`` would defer a piece left
+    lying on the box, and record walking away from it."""
 
     open_steps: int = 12
     """Sim steps to hold the opening jaw before checking the release (~0.4 s at 30 Hz)."""
@@ -816,6 +850,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         # attempt yet, so nothing to cut.
         self._attempt_cut = True
         self._grasp_tilt = 0.0
+        self._let_go_misaligned = False
         # policy_runner never drains these; clear so they cannot leak across episodes.
         self._demo_events.clear()
 
@@ -895,7 +930,20 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         if self._goal is Goal.INSERT:
             # Last look before letting go, while the piece can still be taken back out.
             reason = self._insert_misaligned(env, device)
-            if reason is not None:
+            release_anyway = float(self.config.place_release_misaligned_prob)
+            in_budget = (  # after this failure: else _decide defers it where it lies
+                self._insert_attempts < max(0, int(self.config.max_insert_retries))
+                and self._grasp_attempts < max(1, int(self.config.max_grasp_retries))
+            )
+            if (
+                reason is not None and in_budget
+                and release_anyway > 0.0 and random.random() < release_anyway
+            ):
+                # What a trained policy does: let go wherever the descent ended. Not cut yet —
+                # _after_release cuts once the release is over, so it is never imitated.
+                print(f"[CuroboPolicy] GO: {reason} — letting go anyway, on purpose.")
+                self._let_go_misaligned = True
+            elif reason is not None:
                 self._insert_failed(f"GO: {reason}")
                 return self._start_up(env, device, motion)
         return self._start_jaw(env, device, motion, self.config.jaw_open)
@@ -969,14 +1017,24 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 return action
             # Inside the cavity but still bouncing is a slow success, not a failure.
             inserted = self._piece_inserted(env, require_settled=False)
+        name = self._current_shape(env).name
         if inserted:
+            if self._let_go_misaligned:
+                # It went in anyway, but letting go there was still the mistake: keep the
+                # climb-out, not the release that happened to work.
+                self._cut(f"JAW: {name} dropped in although it was let go misaligned")
+            return self._start_up(env, device, motion)
+        if self._let_go_misaligned:
+            # Leave it where it settled and climb out with the jaw open, as a trained policy
+            # would; _decide then grasps it where it lies. The cut lands here, after the settle
+            # wait, so the recovery clip starts after the release rather than with it.
+            self._insert_failed(f"JAW: {name} was let go misaligned and is not in the box")
             return self._start_up(env, device, motion)
         # It did not fall in, and it is still between the open jaws: close on it again
         # rather than walk away. That needs no plan, and nothing else is reachable from
         # down here anyway.
         self._insert_failed(
-            f"JAW: {self._current_shape(env).name} is not in the box after "
-            f"{self.config.insert_settle_steps} settle step(s)"
+            f"JAW: {name} is not in the box after {self.config.insert_settle_steps} settle step(s)"
         )
         return self._start_jaw(env, device, motion, self.config.jaw_closed)
 
@@ -1278,7 +1336,16 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                         s.name for s in self._todo
                         if self._on_the_box(env, device, s.name) or self._tipped(env, device, s.name)
                     }
-                    self._todo.sort(key=lambda s: s.name not in first)
+                    # Keys up front: list.sort() empties the list while it runs, so a key that
+                    # looks at the queue (the current piece, its hole) would find it empty.
+                    keys = {
+                        s.name: (
+                            s.name not in first,
+                            self._box_distance(env, device, s.name) if self.config.nearest_first else 0.0,
+                        )
+                        for s in self._todo
+                    }
+                    self._todo.sort(key=lambda s: keys[s.name])
             elif self.config.goal_object:
                 self._todo = [ShapeInfo(prim_path=f"{{ENV_REGEX_NS}}/{self.config.goal_object}")]
             else:
@@ -1327,6 +1394,7 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
                 continue
             self._goal = goal
             self._attempt_cut = False
+            self._let_go_misaligned = False
             self._traj = torch.cat([move.waypoints, descent.waypoints])
             self._descent_start = int(move.waypoints.shape[0])
             self._step_idx = 0
@@ -1605,6 +1673,12 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         """Over the cavity's footprint: on the lid, stuck in a hole, or already in the box."""
         xyz = entity_position_in_robot_base(env, name, device=device)
         return self._box_footprint(env, device).outside_by((float(xyz[0]), float(xyz[1]))) < 0.0
+
+    def _box_distance(self, env: gym.Env, device: torch.device, name: str) -> float:
+        """XY distance from a piece to the box origin [m]."""
+        piece = entity_position_in_robot_base(env, name, device=device)
+        box = entity_position_in_robot_base(env, self._box_entity_name(env), device=device)
+        return math.hypot(float(piece[0] - box[0]), float(piece[1] - box[1]))
 
     def _world_still(self, env: gym.Env) -> bool:
         """Nothing that ``_decide`` looks at is moving: the pieces left, and the box."""
