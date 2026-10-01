@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Roll out a set of checkpoints in the sim env and report success rate per checkpoint.
 #
-#   ./eval_checkpoints.sh [--n-episodes N] [--batch-size N] [--viz kit] [--repo REPO] STEP...
+#   ./eval_checkpoints.sh [--n-episodes N] [--batch-size N] [--n-action-steps N] [--viz kit] [--repo REPO] STEP...
 #
 # Held-out loss is a weak proxy for task success on a flow-matching policy, so the
 # only way to pick a checkpoint is to roll it out. Checkpoints are downloaded from
@@ -19,6 +19,7 @@ N_EPISODES=30
 BATCH_SIZE=5
 VIZ=""
 REPO=Artefacts/smolvla-shape-sorting-30fps
+N_ACTION_STEPS=""  # empty = whatever the checkpoint's config.json says
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,7 +27,8 @@ while [[ $# -gt 0 ]]; do
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --viz) VIZ="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    --n-action-steps) N_ACTION_STEPS="$2"; shift 2 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) break ;;
   esac
 done
@@ -34,7 +36,7 @@ done
 
 command -v lerobot-eval >/dev/null || { echo "eval_checkpoints.sh: run 'source ./setup.sh' first" >&2; exit 1; }
 
-OUT=outputs/eval/checkpoints
+OUT=outputs/eval/checkpoints${N_ACTION_STEPS:+/chunk${N_ACTION_STEPS}}
 mkdir -p "${OUT}"
 SUMMARY="${OUT}/summary.tsv"
 # The stage columns are a funnel over piece-trials (n_episodes x pieces): how many pieces got
@@ -56,6 +58,7 @@ snapshot_download('${REPO}', allow_patterns=['checkpoints/${STEP}/pretrained_mod
   fi
 
   RUN_OUT="${OUT}/${STEP}"
+  rm -f "${RUN_OUT}/eval_info.json"  # never parse a previous run's result as this one's
   echo "eval_checkpoints.sh: evaluating ${STEP} (n=${N_EPISODES}, batch=${BATCH_SIZE}) ..."
   # shellcheck disable=SC2086
   if lerobot-eval \
@@ -65,10 +68,11 @@ snapshot_download('${REPO}', allow_patterns=['checkpoints/${STEP}/pretrained_mod
       --env.discover_packages_path=envhub \
       --env.type=shape_sorting_arena \
       ${VIZ:+--env.visualizer=${VIZ}} \
+      ${N_ACTION_STEPS:+--policy.n_action_steps=${N_ACTION_STEPS}} \
       --rename_map="${RENAME}" \
       --eval.batch_size="${BATCH_SIZE}" \
       --eval.n_episodes="${N_EPISODES}" >"${OUT}/${STEP}.log" 2>&1; then
-    python - "${STEP}" "${RUN_OUT}/eval_info.json" "${SUMMARY}" "${OUT}/${STEP}.log" <<'PY'
+    python - "${STEP}" "${RUN_OUT}/eval_info.json" "${SUMMARY}" "${OUT}/${STEP}.log" <<'PY' || printf '%s\t%s\tFAILED\t-\t-\t-\t-\t-\t-\n' "${STEP}" "${N_EPISODES}" >> "${SUMMARY}"
 import json, re, sys
 
 step, path, summary, log = sys.argv[1:5]
