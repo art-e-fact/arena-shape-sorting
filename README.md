@@ -293,8 +293,10 @@ and almost never misses on its own:
 | `--place_perturb_prob` | `0` | Probability that a piece's **first** placement is misaligned on purpose. Retries use the true pose. |
 | `--place_perturb_xy_m` | `0.012` | Half-width of the uniform XY offset on a perturbed placement [m]. |
 | `--place_perturb_yaw_rad` | `0.79` (45°) | Half-width of the uniform yaw offset [rad]. Yaw is the error a trained policy actually makes on non-circular pieces, and a cube arriving 45° off its hole is the recovery it most needs to have seen. |
+| `--place_release_misaligned_prob` | `0` | Probability that a placement caught misaligned is let go anyway, as a trained policy playing its chunk open-loop does, instead of being lifted back out. The arm climbs out with the jaw open and grasps the piece where it settled. The release itself is cut, so only the recovery is recorded. Pair with `--place_perturb_prob`. |
 | `--max_insert_retries` | `2` | Failed inserts per piece before it is parked and sent to the back of the queue. It gets a fresh budget when it comes back round. |
 | `--max_grasp_retries` | `5` | Grasp attempts per piece before it goes to the back of the queue. A grasp direction that does not plan costs nothing. |
+| `--nearest_first` | off | Work the pieces nearest the box first instead of in the listed order (cube, cylinder, hexagon), so each piece is demonstrated first, middle and last. Pieces that start on the box or knocked over still go first. |
 | `--approach_height_m` | `0.04` | Height of the hover above each grasp pose; every grasp comes straight down from it and leaves the same way. |
 | `--insert_align_xy_tol_m` | `0.005` | Piece-to-hole XY offset that still counts as insertable [m]. Measured: clean inserts release at 0.2–1.8 mm, and a 6.7 mm release failed to drop in. Every insert logs its measured alignment, so each run adds to that sample. |
 | `--insert_align_yaw_tol_rad` | `0.17` (10°) | Yaw tolerance [rad]. A 30 mm square in a 3 mm-clearance hole physically binds at about 13°. |
