@@ -14,3 +14,8 @@ datasets/*
 .env.*
 !.env.example
 *.local/
+
+# Policy checkpoints that eval_checkpoints.sh pulls from the Hub (gigabytes of weights).
+ckpt/
+# Claude Code local state, including nested git worktrees.
+.claude/
