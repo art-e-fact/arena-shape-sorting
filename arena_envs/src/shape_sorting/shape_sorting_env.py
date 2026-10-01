@@ -410,6 +410,27 @@ class ShapeSortingEnvironment(ArenaEnvironmentFactory[ShapeSortingEnvironmentCfg
                 bbox = piece.get_bounding_box()
                 half = (bbox.max_point[0] - bbox.min_point[0]) / 2.0
                 sizes[piece.name] = (float(half[2]), float(math.hypot(half[0], half[1])))
+            # Geometry for the staged progress diagnostics (``shape_sorting.predicates.piece_stages``):
+            # binary success is too sparse to rank policies, so evaluation also scores how far each
+            # piece got. Published here because this is where hole centres and piece sizes are known.
+            box_bbox = layout.box.get_bounding_box()
+            env_cfg.piece_stage_params = {
+                "object_names": [piece.name for piece in layout.pieces],
+                "container_name": layout.box.name,
+                "geometry": {
+                    "aabb_min": tuple(cavity.min_point[0].tolist()),
+                    "aabb_max": tuple(cavity.max_point[0].tolist()),
+                    # hole_centers is in the same order as layout.pieces, so each piece is
+                    # measured against its own hole rather than the nearest one.
+                    "hole_centers_xy": [(float(hx), float(hy)) for hx, hy in layout.box.hole_centers],
+                    # A piece whose centre is within its own plan radius of the hole centre
+                    # substantially overlaps that hole.
+                    "hole_tolerances": [sizes[piece.name][1] for piece in layout.pieces],
+                    "box_xy_min": tuple(box_bbox.min_point[0][:2].tolist()),
+                    "box_xy_max": tuple(box_bbox.max_point[0][:2].tolist()),
+                    "lid_top_z": float(layout.box.lid_top_z),
+                },
+            }
             if cfg.tip_over_prob > 0.0:
                 tippable = {
                     name: size for name, size in sizes.items()

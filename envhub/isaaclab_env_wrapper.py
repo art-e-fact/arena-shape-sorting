@@ -91,6 +91,15 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
         # after reset() and each step(), so holding the tensors (not a copy) is enough.
         self._camera_obs: dict[str, Any] | None = None
 
+        # Staged progress diagnostics. Binary success runs at a few percent, too sparse to tell two
+        # policies apart at any affordable episode count, so also score how far each piece got.
+        # This env defines no reward terms, so the reward channel is free — and LeRobot already
+        # writes per-episode ``max_rewards`` into eval_info.json, which is exactly the latched
+        # best progress. Absent on envs that do not publish the geometry; reward stays as it was.
+        self._stage_params = getattr(env.unwrapped.cfg, "piece_stage_params", None)
+        self._stages: torch.Tensor | None = None
+        self._rest_z: torch.Tensor | None = None
+
         self.render_mode = env.render_mode
         self.observation_space = self.single_observation_space = env.observation_space
         self.action_space = self.single_action_space = env.action_space
@@ -129,6 +138,7 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
 
         obs, info = self._env.reset(seed=seed, options=options)
         self._camera_obs = obs.get("camera_obs")
+        self._stages = self._rest_z = None
         info["final_info"] = {"is_success": np.zeros(self.num_envs, dtype=bool)}
         return obs, info
 
@@ -139,10 +149,60 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
         reward = reward.cpu().numpy().astype(np.float32)
         terminated = terminated.cpu().numpy().astype(bool)
         truncated = truncated.cpu().numpy().astype(bool)
+        if self._stage_params is not None:
+            reward = self._update_progress(terminated, truncated)
         # LeRobot reads per-env success from info["final_info"]["is_success"].
         info["final_info"] = {"is_success": self._success_flags(terminated | truncated)}
 
         return obs, reward, terminated, truncated, info
+
+    def _update_progress(self, terminated: np.ndarray, truncated: np.ndarray) -> np.ndarray:
+        """Latch each piece's best stage this episode and return progress in [0, 1] per env.
+
+        Monotone within an episode, so LeRobot's per-episode ``max_rewards`` is the final score.
+        Prints one line per finished episode with the per-piece stages, which ``eval_checkpoints.sh``
+        aggregates into a histogram — the mean alone cannot say *which* stage the policy stalls at.
+        """
+        from shape_sorting.predicates import MAX_STAGE, STAGE_NAMES, piece_stages, read_piece_poses
+
+        local_xyz, world_z = read_piece_poses(
+            self._env, self._stage_params["object_names"], self._stage_params["container_name"]
+        )
+        device = world_z.device
+        done_t = torch.as_tensor(terminated | truncated, device=device)
+
+        if self._stages is None:
+            self._stages = torch.zeros(world_z.shape, dtype=torch.int8, device=device)
+            self._rest_z = world_z.clone()
+        self._rest_z = torch.minimum(self._rest_z, world_z)
+
+        stage = piece_stages(local_xyz, world_z, self._rest_z, **self._stage_params["geometry"])
+        # Isaac Lab auto-resets a done env inside step(), so the scene state visible now for those
+        # envs is already the *next* episode's — drop this step's reading for them.
+        stage = torch.where(done_t.unsqueeze(-1), torch.zeros_like(stage), stage)
+        self._stages = torch.maximum(self._stages, stage)
+        # That reset would otherwise lose the very step an insertion completes, so credit the final
+        # stage outright on success. Not on `terminated`: Arena routes failures like object_dropped
+        # through it too, which would score a piece knocked off the table as a full box.
+        succeeded = self._success_flags(terminated | truncated)
+        self._stages[torch.as_tensor(succeeded, device=device)] = MAX_STAGE
+
+        progress = self._stages.float().mean(dim=1) / MAX_STAGE
+        names = self._stage_params["object_names"]
+        for env_idx in np.flatnonzero(terminated | truncated):
+            stages = self._stages[env_idx].tolist()
+            # piece_stages stays machine-readable for eval_checkpoints.sh; the named form is for
+            # reading the log, where which *piece* stalls matters as much as which stage.
+            print(
+                f"[stages] progress={float(progress[env_idx]):.3f} "
+                f"piece_stages={','.join(str(s) for s in stages)} "
+                + " ".join(f"{name}={STAGE_NAMES[stage]}" for name, stage in zip(names, stages)),
+                flush=True,
+            )
+        # Clear the finished episodes; the next step's reading starts their successors.
+        self._stages[done_t] = 0
+        self._rest_z[done_t] = world_z[done_t]
+        return progress.cpu().numpy().astype(np.float32)
 
     def _success_flags(self, done: np.ndarray) -> np.ndarray:
         """Per-env success taken from Arena's ``success`` termination term, on done steps only."""
