@@ -467,6 +467,36 @@ def test_misaligned_piece_is_not_let_go_with_its_last_insert_try():
     assert any(label.startswith(f"PARK {CUBE}") for label, _ in motion.plans), "let go with no try left"
 
 
+def test_a_piece_let_go_in_mid_air_is_never_recorded_letting_go():
+    # Nothing plans a set-down for the tipped cube, so it is let go where it hangs: a give-up,
+    # not a demonstration. Whether it then falls into its hole by luck or lands on the table
+    # and is picked up again, no checkpoint may confirm that release. A frame is kept only if
+    # the first event after it is a checkpoint (demo_clips: events apply before the frame).
+    for lucky in (True, False):
+        step, drops = 0, []
+
+        def park_tilt(piece, n):  # asked on every release that is not an insert
+            drops.append(step)
+            if lucky:
+                world.in_box.add(piece)
+            return 0.0
+
+        policy, world, env, _ = make(
+            plan_ok=lambda goal, piece, w: not (goal == "PARK" and piece == CUBE),
+            park_tilt=park_tilt,
+        )
+        world.tilt[CUBE] = math.radians(70)  # lying on its side: it comes up tipped
+        events = []
+        for step in range(20_000):
+            policy.get_action(env, None)
+            events += [(step, e) for e in policy.pop_demo_events()]
+            if policy.is_demonstration_ended():
+                break
+        assert world.in_box == {CUBE, CYL, HEX} and len(drops) == 1, (lucky, drops)
+        after = [e for t, e in events if t > drops[0]]
+        assert after[0] == "cut", f"the mid-air release was confirmed (lucky={lucky})"
+
+
 def test_giving_up_on_a_tried_piece_is_cut_but_an_unplannable_one_is_not():
     policy, world, env, _ = make(aligned=lambda piece, n: piece != CUBE)
     _, events = run(policy, env)

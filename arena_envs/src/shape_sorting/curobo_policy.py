@@ -63,8 +63,10 @@ Where a mistake is caught, and what follows:
   open, grasp it where it lies. Only while a regrasp and another insert are in budget, so
   a let-go piece is never deferred where it lies;
 * a grasp that let the piece slip, or tipped an upright piece in the jaws → "cut" in
-  ``_decide``; giving up on a piece that used any tries, or dropping one in mid-air
-  because nothing plans → "cut" too.
+  ``_decide``; giving up on a piece that used any tries → "cut" too;
+* dropping a held piece in mid-air because nothing plans → "cut" once the jaw is open, so
+  no clip starts with that release — a later checkpoint would confirm it, and the piece
+  may well fall into its hole.
 
 **Grasp candidates.** The SO-101 wrist rolls about the gripper's own axis, and that axis
 is vertical in a grasp pose, so the jaw can close along any yaw. Candidates point it along
@@ -1005,8 +1007,15 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
     def _after_release(
         self, env: gym.Env, device: torch.device, motion: MotionClient, action: torch.Tensor
     ) -> torch.Tensor:
-        """The jaw has opened. Only an insert has anything to verify."""
+        """The jaw has opened. Only an insert has anything to verify; a mid-air drop is cut."""
         if self._goal is not Goal.INSERT:
+            if self._traj is None:
+                # No approach was played: _decide_holding let go in mid-air. Cut only now, so
+                # the release is not the next clip's first frame (see "Where a mistake is caught").
+                # ponytail: an env success inside the open window still saves it all — needs
+                # num_success_steps < open_steps - 1 and a near-instant fall into the hole.
+                name = self._current_shape(env).name
+                self._cut(f"JAW: let go of {name} in mid-air — nowhere to put it down")
             return self._start_up(env, device, motion)
         inserted = self._piece_inserted(env)
         if not inserted:
@@ -1220,8 +1229,8 @@ class CuroboPolicy(PolicyBase[CuroboPolicyCfg]):
         print(f"[CuroboPolicy] decide: parking {shape.name} ({why}).")
         if self._plan_go(env, device, motion, Goal.PARK):
             return self._start_go(env, device, motion)
-        self._cut(f"decide: nowhere to put {shape.name} down — letting go here")
-        self._goal = Goal.PARK
+        print(f"[CuroboPolicy] decide: nowhere to put {shape.name} down — letting go here.")
+        self._goal = Goal.PARK  # cut once the jaw is open (_after_release)
         return self._start_jaw(env, device, motion, self.config.jaw_open)
 
     def _decide_empty(
