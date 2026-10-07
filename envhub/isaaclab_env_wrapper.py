@@ -35,6 +35,27 @@ def close_simulation(env, simulation_app) -> None:
     _close_simulation_app(simulation_app)
 
 
+def _rgb_mosaic(camera_obs: dict[str, Any] | None, num_envs: int) -> np.ndarray:
+    """Lay one step's RGB camera observations side by side: ``(num_envs, H, W * cameras, 3)`` uint8.
+
+    These stand in for the viewport LeRobot wants for its eval videos. Isaac Lab 3.0 dropped
+    ``render_mode="rgb_array"`` — ``ManagerBasedRLEnv.render()`` warns and returns ``None`` for
+    every mode — so there is no viewport frame to hand over. The camera observations are the
+    policy's own inputs, already rendered every step, so they cost nothing extra and show what
+    the policy actually saw, which is what a failure needs to be read from.
+    """
+    # Cameras arrive as (num_envs, H, W, 3); depth and segmentation carry a different channel
+    # count and are skipped rather than encoded as bogus RGB.
+    frames = [f for f in (camera_obs or {}).values() if f.shape[-1] == 3]
+    if not frames:
+        # No RGB camera configured, so there is genuinely nothing to show; LeRobot stacks
+        # whatever it gets and needs a stable shape.
+        return np.zeros((num_envs, 480, 640, 3), dtype=np.uint8)
+    mosaic = torch.cat([torch.as_tensor(f) for f in frames], dim=2).cpu().numpy()
+    # mdp.image(normalize=True) yields float in [0, 1]; this repo's cameras are uint8 already.
+    return mosaic if mosaic.dtype == np.uint8 else np.clip(mosaic * 255.0, 0, 255).astype(np.uint8)
+
+
 def _close_simulation_app(simulation_app) -> None:
     """Shut down Kit. May hard-exit the process; flush stdio first."""
     if simulation_app is None:
@@ -66,6 +87,18 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
         self._simulation_app = simulation_app
         self._closed = False
         self.task = task
+        # Last step's camera observations, for render(). LeRobot's render callback runs straight
+        # after reset() and each step(), so holding the tensors (not a copy) is enough.
+        self._camera_obs: dict[str, Any] | None = None
+
+        # Staged progress diagnostics. Binary success runs at a few percent, too sparse to tell two
+        # policies apart at any affordable episode count, so also score how far each piece got.
+        # This env defines no reward terms, so the reward channel is free — and LeRobot already
+        # writes per-episode ``max_rewards`` into eval_info.json, which is exactly the latched
+        # best progress. Absent on envs that do not publish the geometry; reward stays as it was.
+        self._stage_params = getattr(env.unwrapped.cfg, "piece_stage_params", None)
+        self._stages: torch.Tensor | None = None
+        self._rest_z: torch.Tensor | None = None
 
         self.render_mode = env.render_mode
         self.observation_space = self.single_observation_space = env.observation_space
@@ -104,19 +137,72 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
             seed = seed[0] if len(seed) > 0 else None
 
         obs, info = self._env.reset(seed=seed, options=options)
+        self._camera_obs = obs.get("camera_obs")
+        self._stages = self._rest_z = None
         info["final_info"] = {"is_success": np.zeros(self.num_envs, dtype=bool)}
         return obs, info
 
     def step(self, actions: np.ndarray | torch.Tensor) -> tuple[dict, np.ndarray, np.ndarray, np.ndarray, dict]:
         obs, reward, terminated, truncated, info = self._env.step(torch.as_tensor(actions, device=self.device))
+        self._camera_obs = obs.get("camera_obs")
 
         reward = reward.cpu().numpy().astype(np.float32)
         terminated = terminated.cpu().numpy().astype(bool)
         truncated = truncated.cpu().numpy().astype(bool)
+        if self._stage_params is not None:
+            reward = self._update_progress(terminated, truncated)
         # LeRobot reads per-env success from info["final_info"]["is_success"].
         info["final_info"] = {"is_success": self._success_flags(terminated | truncated)}
 
         return obs, reward, terminated, truncated, info
+
+    def _update_progress(self, terminated: np.ndarray, truncated: np.ndarray) -> np.ndarray:
+        """Latch each piece's best stage this episode and return progress in [0, 1] per env.
+
+        Monotone within an episode, so LeRobot's per-episode ``max_rewards`` is the final score.
+        Prints one line per finished episode with the per-piece stages, which ``eval_checkpoints.sh``
+        aggregates into a histogram — the mean alone cannot say *which* stage the policy stalls at.
+        """
+        from shape_sorting.predicates import MAX_STAGE, STAGE_NAMES, piece_stages, read_piece_poses
+
+        local_xyz, world_z = read_piece_poses(
+            self._env, self._stage_params["object_names"], self._stage_params["container_name"]
+        )
+        device = world_z.device
+        done_t = torch.as_tensor(terminated | truncated, device=device)
+
+        if self._stages is None:
+            self._stages = torch.zeros(world_z.shape, dtype=torch.int8, device=device)
+            self._rest_z = world_z.clone()
+        self._rest_z = torch.minimum(self._rest_z, world_z)
+
+        stage = piece_stages(local_xyz, world_z, self._rest_z, **self._stage_params["geometry"])
+        # Isaac Lab auto-resets a done env inside step(), so the scene state visible now for those
+        # envs is already the *next* episode's — drop this step's reading for them.
+        stage = torch.where(done_t.unsqueeze(-1), torch.zeros_like(stage), stage)
+        self._stages = torch.maximum(self._stages, stage)
+        # That reset would otherwise lose the very step an insertion completes, so credit the final
+        # stage outright on success. Not on `terminated`: Arena routes failures like object_dropped
+        # through it too, which would score a piece knocked off the table as a full box.
+        succeeded = self._success_flags(terminated | truncated)
+        self._stages[torch.as_tensor(succeeded, device=device)] = MAX_STAGE
+
+        progress = self._stages.float().mean(dim=1) / MAX_STAGE
+        names = self._stage_params["object_names"]
+        for env_idx in np.flatnonzero(terminated | truncated):
+            stages = self._stages[env_idx].tolist()
+            # piece_stages stays machine-readable for eval_checkpoints.sh; the named form is for
+            # reading the log, where which *piece* stalls matters as much as which stage.
+            print(
+                f"[stages] progress={float(progress[env_idx]):.3f} "
+                f"piece_stages={','.join(str(s) for s in stages)} "
+                + " ".join(f"{name}={STAGE_NAMES[stage]}" for name, stage in zip(names, stages)),
+                flush=True,
+            )
+        # Clear the finished episodes; the next step's reading starts their successors.
+        self._stages[done_t] = 0
+        self._rest_z[done_t] = world_z[done_t]
+        return progress.cpu().numpy().astype(np.float32)
 
     def _success_flags(self, done: np.ndarray) -> np.ndarray:
         """Per-env success taken from Arena's ``success`` termination term, on done steps only."""
@@ -132,27 +218,16 @@ class IsaacLabEnvWrapper(gym.vector.AsyncVectorEnv):
         if name in ("task", "task_description"):
             return [self.task] * self.num_envs
         if name == "render":
-            frame = self.render()
-            # LeRobot stacks these into a video, so keep the shape stable without a viewport.
-            if frame is None:
-                frame = np.zeros((480, 640, 3), dtype=np.uint8)
-            return [frame] * self.num_envs
+            # One frame per sub-env: LeRobot maps them onto the episodes running concurrently.
+            return list(_rgb_mosaic(self._camera_obs, self.num_envs))
         raise AttributeError(f"IsaacLabEnvWrapper does not expose '{name}'")
 
     def get_attr(self, name: str) -> list[Any]:
         return self.call(name)
 
-    def render(self) -> np.ndarray | None:
-        """Return a single RGB viewport frame (LeRobot uses these for its eval videos)."""
-        if self.render_mode != "rgb_array":
-            return None
-        frame = self._env.render()
-        if isinstance(frame, torch.Tensor):
-            frame = frame.cpu().numpy()
-        if frame is None:
-            return None
-        # Isaac Lab may return a batch of frames; the viewport shows only one.
-        return frame[0] if frame.ndim == 4 else frame
+    def render(self) -> np.ndarray:
+        """One RGB frame for sub-env 0 (``call('render')`` serves the whole batch)."""
+        return _rgb_mosaic(self._camera_obs, self.num_envs)[0]
 
     def close(self, **kwargs) -> None:
         """Close the Isaac Lab env only (once).
