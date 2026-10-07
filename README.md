@@ -455,9 +455,45 @@ those flags dies at startup. Why, and what the error messages look like:
 [`smolvla-tuning.md`](training_research.local/smolvla-tuning.md).
 
 Defaults: `gpu-h100-sxm` / `1gpu-16vcpu-200gb`, 12 h timeout, 250 GiB disk.
-Add `--platform gpu-h200-sxm` for 141 GB of VRAM, `--preemptible` for a cheaper
-but interruptible GPU, `--follow` to stream logs, or `--dry-run` to validate the
-request for free. `nebius/train.sh --help` lists them all.
+Add `--platform gpu-h200-sxm` for 141 GB of VRAM, `--follow` to stream logs, or
+`--dry-run` to validate the request for free. `nebius/train.sh --help` lists them all.
+
+#### Spot pricing
+
+`--preemptible` runs on a spot-priced GPU that the platform can take back at any
+time (SIGTERM, 60 s, SIGKILL). Pair it with `--supervise`:
+
+```bash
+nebius/train.sh --preemptible --supervise --name smolvla-500ep --timeout 4h -- ...  # same args as above
+```
+
+Inside the job, `nebius/train_sigterm.py` turns the SIGTERM into one more checkpoint
+push, so a preemption loses at most one step (or one `--save_freq` interval, if 60 s
+is not enough for the 1.3 GB upload). `--supervise` keeps the launcher attached: when
+the job ends `FAILED` — Nebius reports a preemption, a timeout and a crash the same
+way — it resubmits with `--resume`, which downloads the latest `checkpoints/<step>`
+from `--policy.repo_id` and continues sample-exactly in the same W&B run. It gives up
+after two attempts in a row that added no checkpoint, so a crash does not loop, and
+`--timeout` becomes a per-attempt ceiling. Ctrl-C stops the watcher only; to
+continue a run whose watcher died, re-run the same command with `--resume`. Both
+need `--save_checkpoint_to_hub=true`.
+
+#### Reusing a model repo id (Hub versioning)
+
+Resume takes the highest `checkpoints/<step>` in the repo, whoever wrote it, so a
+fresh run refuses to start while another run's checkpoints are still there. Before
+training into a repo id again, freeze the current `main` as a tag, then clear the
+checkpoints and their numeric step tags (the tag keeps them reachable):
+
+```python
+from huggingface_hub import HfApi
+api, repo = HfApi(), "Artefacts/smolvla-shape-sorting-30fps"
+api.create_tag(repo, tag="run-005-v3", repo_type="model")
+api.delete_folder("checkpoints", repo_id=repo, repo_type="model", commit_message="clear run-005 checkpoints")
+for ref in api.list_repo_refs(repo, repo_type="model").tags:
+    if ref.name.isdigit():
+        api.delete_tag(repo, tag=ref.name, repo_type="model")
+```
 
 ```bash
 nebius ai job list                 # what is running
