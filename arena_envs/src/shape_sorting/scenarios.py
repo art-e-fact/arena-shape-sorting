@@ -88,6 +88,12 @@ SCENARIOS: dict[str, Scenario] = {
         curobo={"place_perturb_prob": 1.0, "max_insert_retries": 0},
         expect="completes",
     ),
+    "17_let_go_misaligned": Scenario(
+        "Inserts aimed off are let go anyway, as a trained policy would; the arm climbs out with"
+        " the jaw open and grasps the piece again where it settled.",
+        env={"episode_length_s": 60},
+        curobo={"place_perturb_prob": 1.0, "place_release_misaligned_prob": 1.0},
+    ),
 }
 
 # Upper bound on a run: Kit boot + cold shader cache + cuRobo warm-up, then sim time

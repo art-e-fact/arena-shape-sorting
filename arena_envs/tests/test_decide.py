@@ -296,6 +296,23 @@ def test_happy_path_inserts_everything_and_goes_home():
     assert kinds(events) == ["checkpoint"] * 3
 
 
+def test_nearest_first_works_outward_from_the_box_after_the_stuck_pieces():
+    distance = {CUBE: 0.30, CYL: 0.10, HEX: 0.20}
+    for nearest, on_box, order in (
+        (False, set(), [CUBE, CYL, HEX]),
+        (True, set(), [CYL, HEX, CUBE]),
+        (True, {CUBE}, [CUBE, CYL, HEX]),  # a piece stuck on the box still goes first
+    ):
+        policy, world, env, motion = make(cfg=CuroboPolicyCfg(nearest_first=nearest))
+        world.on_box |= on_box
+        # Reads the queue like the real one does (via the current piece's hole): a key that
+        # does that mid-sort finds the list empty, which the first sim run tripped over.
+        policy._box_distance = lambda env, device, name: (policy._current_shape(env), distance[name])[1]
+        run(policy, env)
+        grasped = [l.split()[1] for l, ok in motion.plans if ok and l.startswith("GRASP") and l.endswith("descent")]
+        assert grasped == order, (nearest, on_box, grasped)
+
+
 def test_boxed_in_piece_waits_for_its_neighbour():
     # The logged failure: the cube sits between the cylinder and the hexagon on the
     # radial line and no grasp plans until the cylinder is gone.
@@ -408,6 +425,46 @@ def test_grasping_an_already_wedged_piece_is_the_recovery_not_a_mistake():
     _, events = run(policy, env)
     assert world.in_box == {CUBE, CYL, HEX}
     assert kinds(events) == ["cut", "cut", "checkpoint", "checkpoint", "checkpoint"]
+
+
+def test_misaligned_piece_let_go_on_purpose_is_regrasped_from_above():
+    # A trained policy lets go wherever its chunk ends, then climbs out. The recording has
+    # to start after that release, and recover the way the policy will have to: from above,
+    # never by closing on the piece again at the bottom.
+    cfg = CuroboPolicyCfg(place_release_misaligned_prob=1.0)
+    policy, world, env, motion = make(
+        cfg=cfg,
+        aligned=lambda piece, n: not (piece == CUBE and n == 1),
+        drops_in=lambda piece, n: not (piece == CUBE and n == 1),
+    )
+    cuts, cut = [], policy._cut
+    policy._cut = lambda reason: (cuts.append((policy._phase, policy._jaw_cmd)), cut(reason))
+    _, events = run(policy, env)
+    assert world.in_box == {CUBE, CYL, HEX}
+    assert kinds(events) == ["cut", "checkpoint", "checkpoint", "checkpoint"]
+    assert cuts == [(Phase.JAW, cfg.jaw_open)], "cut before the release was over"
+    assert world.calls[("regrip_holds", CUBE)] == 0, "closed on it again at the bottom"
+    grasps = [l for l, ok in motion.plans if ok and l.startswith(f"GRASP {CUBE}") and l.endswith("descent")]
+    assert len(grasps) == 2
+
+
+def test_misaligned_piece_that_drops_in_anyway_is_still_cut():
+    # Letting go off the hole was the mistake even when the chamfer saves it.
+    cfg = CuroboPolicyCfg(place_release_misaligned_prob=1.0)
+    policy, world, env, _ = make(cfg=cfg, aligned=lambda piece, n: not (piece == CUBE and n == 1))
+    _, events = run(policy, env)
+    assert world.in_box == {CUBE, CYL, HEX}
+    assert kinds(events) == ["cut", "checkpoint", "checkpoint", "checkpoint"]
+
+
+def test_misaligned_piece_is_not_let_go_with_its_last_insert_try():
+    # Letting go would spend the last try, and _decide would then defer the piece where it
+    # lies — recording "walk away from a piece on the box". Lift it out and park it instead.
+    cfg = CuroboPolicyCfg(place_release_misaligned_prob=1.0, max_insert_retries=0)
+    policy, world, env, motion = make(cfg=cfg, aligned=lambda piece, n: not (piece == CUBE and n == 1))
+    run(policy, env)
+    assert world.in_box == {CUBE, CYL, HEX}
+    assert any(label.startswith(f"PARK {CUBE}") for label, _ in motion.plans), "let go with no try left"
 
 
 def test_giving_up_on_a_tried_piece_is_cut_but_an_unplannable_one_is_not():
@@ -638,7 +695,10 @@ def test_fuzz_always_terminates_and_checkpoints_only_real_inserts():
             "keeps_hold": lambda piece, n, rng=rng: rng.random() < 0.9,
             "still": lambda piece, n, rng=rng: rng.random() < 0.7,
         }
-        cfg = CuroboPolicyCfg(miss_notice_delay_max_steps=rng.choice([0, 30]))
+        cfg = CuroboPolicyCfg(
+            miss_notice_delay_max_steps=rng.choice([0, 30]),
+            place_release_misaligned_prob=rng.choice([0.0, 0.5]),
+        )
         policy, world, env, _ = make(cfg=cfg, **rules)
         for piece in world.tilt:  # some start dropped on the lid: fell in, wedged, or level
             world.tilt[piece] = rng.choice([0.0, 0.0, math.radians(35), math.radians(70)])
