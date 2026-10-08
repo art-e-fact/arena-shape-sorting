@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Roll out a set of checkpoints in the sim env and report success rate per checkpoint.
 #
-#   ./eval_checkpoints.sh [--n-episodes N] [--batch-size N] [--viz kit] [--repo REPO] STEP...
+#   ./eval_checkpoints.sh [--n-episodes N] [--batch-size N] [--n-action-steps N] [--viz kit] [--repo REPO] STEP...
 #
 # Held-out loss is a weak proxy for task success on a flow-matching policy, so the
 # only way to pick a checkpoint is to roll it out. Checkpoints are downloaded from
@@ -19,6 +19,7 @@ N_EPISODES=30
 BATCH_SIZE=5
 VIZ=""
 REPO=Artefacts/smolvla-shape-sorting-30fps
+N_ACTION_STEPS=""  # empty = whatever the checkpoint's config.json says
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -26,7 +27,8 @@ while [[ $# -gt 0 ]]; do
     --batch-size) BATCH_SIZE="$2"; shift 2 ;;
     --viz) VIZ="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
-    -h|--help) sed -n '2,16p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    --n-action-steps) N_ACTION_STEPS="$2"; shift 2 ;;
+    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) break ;;
   esac
 done
@@ -34,10 +36,13 @@ done
 
 command -v lerobot-eval >/dev/null || { echo "eval_checkpoints.sh: run 'source ./setup.sh' first" >&2; exit 1; }
 
-OUT=outputs/eval/checkpoints
+OUT=outputs/eval/checkpoints${N_ACTION_STEPS:+/chunk${N_ACTION_STEPS}}
 mkdir -p "${OUT}"
 SUMMARY="${OUT}/summary.tsv"
-printf 'checkpoint\tn_episodes\tpc_success\tavg_max_reward\teval_s\n' > "${SUMMARY}"
+# The stage columns are a funnel over piece-trials (n_episodes x pieces): how many pieces got
+# at least that far. Binary success alone is too sparse to rank checkpoints — see the staged
+# progress note in shape_sorting/predicates.py.
+printf 'checkpoint\tn_episodes\tpc_success\tavg_progress\tlifted\tover_box\tover_hole\tin_box\teval_s\n' > "${SUMMARY}"
 
 RENAME='{"observation.images.camera_ego_rgb": "observation.images.ego_view", "observation.images.external_camera_rgb": "observation.images.exterior_image"}'
 
@@ -49,10 +54,11 @@ for STEP in "$@"; do
 import sys
 from huggingface_hub import snapshot_download
 snapshot_download('${REPO}', allow_patterns=['checkpoints/${STEP}/pretrained_model/*'], local_dir='ckpt')
-" || { printf '%s\t%s\tFAILED\t-\t-\n' "${STEP}" "${N_EPISODES}" >> "${SUMMARY}"; continue; }
+" || { printf '%s\t%s\tFAILED\t-\t-\t-\t-\t-\t-\n' "${STEP}" "${N_EPISODES}" >> "${SUMMARY}"; continue; }
   fi
 
   RUN_OUT="${OUT}/${STEP}"
+  rm -f "${RUN_OUT}/eval_info.json"  # never parse a previous run's result as this one's
   echo "eval_checkpoints.sh: evaluating ${STEP} (n=${N_EPISODES}, batch=${BATCH_SIZE}) ..."
   # shellcheck disable=SC2086
   if lerobot-eval \
@@ -62,20 +68,39 @@ snapshot_download('${REPO}', allow_patterns=['checkpoints/${STEP}/pretrained_mod
       --env.discover_packages_path=envhub \
       --env.type=shape_sorting_arena \
       ${VIZ:+--env.visualizer=${VIZ}} \
+      ${N_ACTION_STEPS:+--policy.n_action_steps=${N_ACTION_STEPS}} \
       --rename_map="${RENAME}" \
       --eval.batch_size="${BATCH_SIZE}" \
       --eval.n_episodes="${N_EPISODES}" >"${OUT}/${STEP}.log" 2>&1; then
-    python - "${STEP}" "${RUN_OUT}/eval_info.json" "${SUMMARY}" <<'PY'
-import json, sys
-step, path, summary = sys.argv[1], sys.argv[2], sys.argv[3]
-o = json.load(open(path))["overall"]
+    python - "${STEP}" "${RUN_OUT}/eval_info.json" "${SUMMARY}" "${OUT}/${STEP}.log" <<'PY' || printf '%s\t%s\tFAILED\t-\t-\t-\t-\t-\t-\n' "${STEP}" "${N_EPISODES}" >> "${SUMMARY}"
+import json, re, sys
+
+step, path, summary, log = sys.argv[1:5]
+overall = json.load(open(path))["overall"]
+
+# The env wrapper prints one "[stages] ... piece_stages=4,4,1" line per finished episode.
+trials = []
+for line in open(log, errors="replace"):
+    match = re.search(r"piece_stages=([\d,]+)", line)
+    if match:
+        trials += [int(stage) for stage in match.group(1).split(",")]
+
+# Funnel: pieces that got at least as far as each stage. Reads top-down as a drop-off curve.
+if trials:
+    columns = [f"{sum(s >= k for s in trials)}/{len(trials)}" for k in range(1, 5)]
+else:
+    columns = ["-"] * 4
+
+# avg_max_reward is the staged progress score: this env defines no reward terms.
+row = [step, overall["n_episodes"], overall["pc_success"], f"{overall['avg_max_reward']:.3f}"]
 with open(summary, "a") as f:
-    f.write(f"{step}\t{o['n_episodes']}\t{o['pc_success']}\t{o['avg_max_reward']}\t{o['eval_s']:.0f}\n")
-print(f"  {step}: pc_success={o['pc_success']}% over {o['n_episodes']} episodes")
+    f.write("\t".join(str(value) for value in [*row, *columns, f"{overall['eval_s']:.0f}"]) + "\n")
+print(f"  {step}: pc_success={overall['pc_success']}% progress={overall['avg_max_reward']:.3f} "
+      f"lifted/on-box/on-hole/in-box={' '.join(columns)}")
 PY
   else
     echo "  ${STEP}: FAILED (see ${OUT}/${STEP}.log)"
-    printf '%s\t%s\tFAILED\t-\t-\n' "${STEP}" "${N_EPISODES}" >> "${SUMMARY}"
+    printf '%s\t%s\tFAILED\t-\t-\t-\t-\t-\t-\n' "${STEP}" "${N_EPISODES}" >> "${SUMMARY}"
   fi
 done
 
