@@ -1,5 +1,7 @@
 # IsaacLab-Arena shape-sorting environment and SO-101 embodiment
 
+[![Artefacts CI: eval](https://app.artefacts.com/api/artefacts/IsaacLab-Arena-experiments/badges/eval.png)](https://app.artefacts.com/artefacts/IsaacLab-Arena-experiments) [![Artefacts CI: curobo_scenarios](https://app.artefacts.com/api/artefacts/IsaacLab-Arena-experiments/badges/curobo_scenarios.png)](https://app.artefacts.com/artefacts/IsaacLab-Arena-experiments)
+
 Example workspace for solving a shape-sorting task with an SO-101 arm in a procedurally generated environment.
 
 Main features:
